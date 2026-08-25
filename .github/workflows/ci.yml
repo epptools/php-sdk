@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-suite:
+    name: php ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.0 is the floor declared in composer.json, so it is tested rather than assumed.
+        php: ['8.0', '8.1', '8.2', '8.3', '8.4']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: dom, libxml, openssl, mbstring
+          coverage: none
+
+      # No `composer install`: the only runtime dependency is a PSR-3 interface used when a logger
+      # is passed, and the suite runs against the bundled autoloader. Running it from a bare
+      # checkout is what proves the library works without Composer, as the README claims.
+      - name: offline suite
+        run: php tests/offline_test.php
+
+  manifest:
+    name: composer.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      # --strict fails on the things Packagist would otherwise accept and then display badly: a
+      # missing description, a licence it cannot identify, a malformed constraint.
+      - run: composer validate --strict
+
+      # Proves the published package is installable as declared — that the PSR-4 root resolves and
+      # the platform requirements can actually be satisfied.
+      - run: composer install --no-interaction --prefer-dist
+      - run: composer test

@@ -1,0 +1,24 @@
+# Dependencies
+/vendor/
+# A LIBRARY does not commit its lock file: the versions that matter are the application's, and a
+# lock file here would be resolved and thrown away by every consumer.
+composer.lock
+
+# Tooling caches
+.phpunit.result.cache
+.phpunit.cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Credentials and key material. The README tells you to keep a CA bundle and, for mutual TLS, a
+# client certificate and key nearby — none of that belongs in a commit.
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+.env
+auth.json

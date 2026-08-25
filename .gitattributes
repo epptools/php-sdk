@@ -1,0 +1,11 @@
+# Normalise line endings in the repository to LF. Without this, a clone on Windows can commit CRLF
+# back and every later diff shows the whole file as changed.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+# Ship only what a consumer needs: src/ + autoload + LICENSE + README + CHANGELOG.
+/tests            export-ignore
+/examples         export-ignore
+/.github          export-ignore
+/.gitattributes   export-ignore
+/.gitignore       export-ignore
