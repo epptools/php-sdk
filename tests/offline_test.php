@@ -512,6 +512,34 @@ check('contact disclose flag=0', $kx->query('//contact:disclose[@flag="0"]')->le
 check('contact disclose addr type=int', $kx->query('//contact:disclose/contact:addr[@type="int"]')->length === 1);
 check('contact disclose voice flag present', $kx->query('//contact:disclose/contact:voice')->length === 1);
 
+// Removing an organisation is expressed by an EMPTY element, and the difference between "empty" and
+// "absent" is the whole mechanism: <contact:org/> means take it away, no element at all means leave
+// it alone. Get that backwards in either direction and it fails silently — an omitted clear leaves a
+// former organisation in the public WHOIS, while a phantom clear wipes one that was never touched.
+echo "contact update: an EMPTY org removes it, an ABSENT org says nothing\n";
+[$client, $fake] = makeClient([$GREETING, $OK()]);
+$client->connect();
+$client->contact()->update('c1', ['chg' => ['postalInfo' => ['type' => 'loc', 'org' => '', 'city' => 'Kyiv', 'cc' => 'UA']]]);
+$kx = xp($fake->written[0]);
+check('org emitted for a clear', $kx->query('//contact:chg/contact:postalInfo/contact:org')->length === 1);
+check('and it is empty', firstText($kx, '//contact:chg/contact:postalInfo/contact:org') === '');
+
+[$client, $fake] = makeClient([$GREETING, $OK()]);
+$client->connect();
+$client->contact()->update('c1', ['chg' => ['postalInfo' => ['type' => 'loc', 'city' => 'Lviv', 'cc' => 'UA']]]);
+$kx = xp($fake->written[0]);
+check('no org element when the caller never mentioned it', $kx->query('//contact:chg/contact:postalInfo/contact:org')->length === 0);
+
+// On a create there is nothing to remove, so an empty org is simply not an element.
+[$client, $fake] = makeClient([$GREETING, $OK()]);
+$client->connect();
+$client->contact()->create('c1', [
+    'postalInfos' => [['type' => 'int', 'name' => 'ACME', 'org' => '', 'city' => 'Kyiv', 'cc' => 'UA']],
+    'email' => 'contact@example.com', 'authInfo' => 'pw',
+]);
+$kx = xp($fake->written[0]);
+check('create never emits an empty org', $kx->query('//contact:create/contact:postalInfo/contact:org')->length === 0);
+
 echo "contact create: the reserved id asks the registry to mint the handle\n";
 $creData = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
     . '<result code="1000"><msg>Command completed successfully</msg></result>'
@@ -1563,4 +1591,5 @@ check('a near-miss spelling is still refused, not silently dropped', $refused !=
 
 echo "\n$pass passed, $fail failed\n";
 exit($fail === 0 ? 0 : 1);
+
 
