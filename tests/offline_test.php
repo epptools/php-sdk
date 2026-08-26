@@ -1201,6 +1201,51 @@ check("a fee that is not a decimal", $argFails(static fn () => $vClient->domain(
 check('a disclose field that does not exist', $argFails(static fn () => $vClient->contact()->createBuilder('c1', 'contact@example.com')->withhold('passport')));
 check('removing all DNSSEC and naming records at once', $argFails(static fn () => $vClient->domain()->updateBuilder('x.ua')->removeAllDnssec()->remDsRecord(1, 8, 2, 'AB')));
 check('an unknown option key', $argFails(static fn () => $vClient->domain()->create('x.ua', ['yeras' => 1])));
+
+echo "contact: which postal fields can be CLEARED is the schema's decision, not ours\n";
+// contact-1.0.xsd: optPostalLineType (org, street, sp) and pcType have no minLength, so those clear
+// by being sent empty. postalLineType (name, city) has minLength 1 and ccType is exactly two
+// characters, so an empty one of those is schema-invalid — and an invalid frame comes back as a bare
+// 2001 that names no element, the least useful error in EPP.
+[$pClient, $pFake] = makeClient([$GREETING, $OK(), $OK()]);
+$pClient->connect();
+
+check(
+    'clearing sp WITHOUT the required parts of <addr> is refused here, not by the server',
+    $argFails(static fn () => $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'sp' => '']]])),
+);
+check(
+    'and the message names the part that is missing',
+    (static function () use ($pClient): bool {
+        try {
+            $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'sp' => '']]]);
+        } catch (\EppTools\Exception\ValidationException $e) {
+            return str_contains($e->getMessage(), 'city');
+        }
+
+        return false;
+    })(),
+);
+check(
+    'a name cannot be cleared at all — there is no empty postalLineType',
+    $argFails(static fn () => $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'name' => '', 'city' => 'Lviv', 'cc' => 'UA']]])),
+);
+
+// The whole point of the guard is that the CORRECT call still works and still clears.
+$pClient->contact()->update('C-1', ['chg' => ['postalInfo' => [
+    'type' => 'loc', 'sp' => '', 'city' => 'Lviv', 'cc' => 'UA',
+]]]);
+$px = xp($pFake->written[0]);
+check('sp goes out as an empty element, which is what clears it', $px->query('//contact:addr/contact:sp')->length === 1
+    && firstText($px, '//contact:addr/contact:sp') === '');
+check('and the required parts travel with it', firstText($px, '//contact:addr/contact:city') === 'Lviv'
+    && firstText($px, '//contact:addr/contact:cc') === 'UA');
+
+// org is the field the documentation names first, and it needs no address at all.
+$pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'org' => '']]]);
+$ox = xp($pFake->written[1]);
+check('clearing org alone sends no <addr> and needs no city', $ox->query('//contact:addr')->length === 0
+    && $ox->query('//contact:postalInfo/contact:org')->length === 1);
 check('ValidationException is still an EppException', is_subclass_of(\EppTools\Exception\ValidationException::class, \EppTools\Exception\EppException::class));
 check('but NOT a ConfigException', !is_subclass_of(\EppTools\Exception\ValidationException::class, \EppTools\Exception\ConfigException::class));
 

@@ -255,9 +255,16 @@ final class Contact
         $send = static fn (string $key): bool => $partial ? array_key_exists($key, $pi) : true;
 
         if ($send('name')) {
-            $frame->ns($block, Namespaces::CONTACT, 'contact:name', (string) ($pi['name'] ?? ''));
+            // WHICH FIELDS CAN BE EMPTIED IS FIXED BY THE SCHEMA, not by us. `name` is
+            // postalLineType, minLength 1, so there is NO WAY to clear a name — an empty element is
+            // schema-invalid and the server answers a bare 2001 naming no field. Refused here, where
+            // the message can say so.
+            self::requireNotEmpty($pi['name'] ?? '', 'name');
+            $frame->ns($block, Namespaces::CONTACT, 'contact:name', (string) $pi['name']);
         }
         if ($partial ? array_key_exists('org', $pi) : !empty($pi['org'])) {
+            // org is optPostalLineType, which HAS no minLength — so an empty one is legal and is
+            // exactly how an organisation is removed.
             $frame->ns($block, Namespaces::CONTACT, 'contact:org', (string) ($pi['org'] ?? ''));
         }
 
@@ -267,6 +274,24 @@ final class Contact
         if (!$touchesAddr) {
             return;
         }
+
+        // AND "WHOLE" MEANS THE CALLER HAS TO SUPPLY THE REQUIRED PARTS. This used to substitute an
+        // empty string for whatever was missing, so clearing one optional field — `['sp' => '']`,
+        // the documented way to remove a state — emitted <city/> and <cc/> alongside it. city is
+        // postalLineType (minLength 1) and cc is ccType (exactly 2 characters): the frame was
+        // schema-invalid, and what came back was a bare 2001 that names no element. A caller doing
+        // precisely what the manual told them to got an error that pointed at nothing.
+        foreach (['city', 'cc'] as $required) {
+            if (($pi[$required] ?? '') === '') {
+                throw new ValidationException(sprintf(
+                    'postalInfo: changing any part of the address means sending the whole <contact:addr>, '
+                    . 'and RFC 5733 makes "%s" a required part of it. Read the current address with '
+                    . 'contact()->info() and send city and cc back unchanged alongside what you are changing.',
+                    $required,
+                ));
+            }
+        }
+
         $addr = $frame->ns($block, Namespaces::CONTACT, 'contact:addr');
         foreach ((array) ($pi['street'] ?? []) as $line) {
             $frame->ns($addr, Namespaces::CONTACT, 'contact:street', (string) $line);
@@ -278,7 +303,27 @@ final class Contact
         if ($partial ? array_key_exists('pc', $pi) : !empty($pi['pc'])) {
             $frame->ns($addr, Namespaces::CONTACT, 'contact:pc', (string) ($pi['pc'] ?? ''));
         }
-        $frame->ns($addr, Namespaces::CONTACT, 'contact:cc', (string) ($pi['cc'] ?? ''));
+        $frame->ns($addr, Namespaces::CONTACT, 'contact:cc', (string) $pi['cc']);
+    }
+
+    /**
+     * Refuse an empty value for an element whose schema type forbids one.
+     *
+     * The distinction is not a house rule, it is contact-1.0.xsd: `optPostalLineType` (org, street,
+     * sp) has no minLength and `pcType` has none either, so those four clear by being sent empty.
+     * `postalLineType` (name, city) has minLength 1 and `ccType` is exactly two characters, so an
+     * empty one of those cannot be sent at all. Getting it wrong costs a round trip and returns a
+     * bare 2001 with no field named — which is the least useful error in EPP.
+     */
+    private static function requireNotEmpty(mixed $value, string $field): void
+    {
+        if (trim((string) $value) === '') {
+            throw new ValidationException(sprintf(
+                'postalInfo: "%s" cannot be empty — RFC 5733 gives it a schema type with a minimum '
+                . 'length, so there is no way to clear it. Omit the key to leave it unchanged.',
+                $field,
+            ));
+        }
     }
 
     /**
