@@ -43,10 +43,8 @@ final class Response
         $xpath->registerNamespace('rgp', Namespaces::RGP);
         // No prefix is registered for a registry's own extensions, and none is needed: every read of
         // extension data in this class goes through local-name(), which matches an element by its
-        // name whatever namespace it arrived under. That is why a response under the registry's
-        // older URIs kept parsing when it moved to new ones — and it is what lets this library read
-        // a registry it has never seen. The two prefixes that used to be registered here named one
-        // particular registry and were used by no query in the file.
+        // name whatever namespace it arrived under. So a response keeps parsing when a registry moves
+        // to a new extension URI, and this library can read a registry it has never seen.
         $xpath->registerNamespace('fee', Namespaces::FEE);
 
         return new self($xml, $dom, $xpath);
