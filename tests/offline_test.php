@@ -519,14 +519,14 @@ check('contact disclose voice flag present', $kx->query('//contact:disclose/cont
 echo "contact update: an EMPTY org removes it, an ABSENT org says nothing\n";
 [$client, $fake] = makeClient([$GREETING, $OK()]);
 $client->connect();
-$client->contact()->update('c1', ['chg' => ['postalInfo' => ['type' => 'loc', 'org' => '', 'city' => 'Kyiv', 'cc' => 'UA']]]);
+$client->contact()->update('c1', ['chg' => ['postalInfo' => ['type' => 'loc', 'name' => 'Ivan Petrenko', 'org' => '', 'city' => 'Kyiv', 'cc' => 'UA']]]);
 $kx = xp($fake->written[0]);
 check('org emitted for a clear', $kx->query('//contact:chg/contact:postalInfo/contact:org')->length === 1);
 check('and it is empty', firstText($kx, '//contact:chg/contact:postalInfo/contact:org') === '');
 
 [$client, $fake] = makeClient([$GREETING, $OK()]);
 $client->connect();
-$client->contact()->update('c1', ['chg' => ['postalInfo' => ['type' => 'loc', 'city' => 'Lviv', 'cc' => 'UA']]]);
+$client->contact()->update('c1', ['chg' => ['postalInfo' => ['type' => 'loc', 'name' => 'Ivan Petrenko', 'city' => 'Lviv', 'cc' => 'UA']]]);
 $kx = xp($fake->written[0]);
 check('no org element when the caller never mentioned it', $kx->query('//contact:chg/contact:postalInfo/contact:org')->length === 0);
 
@@ -1246,7 +1246,7 @@ check(
     'and the message names the part that is missing',
     (static function () use ($pClient): bool {
         try {
-            $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'sp' => '']]]);
+            $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'name' => 'Ivan Petrenko', 'sp' => '']]]);
         } catch (\EppTools\Exception\ValidationException $e) {
             return str_contains($e->getMessage(), 'city');
         }
@@ -1261,7 +1261,7 @@ check(
 
 // The whole point of the guard is that the CORRECT call still works and still clears.
 $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => [
-    'type' => 'loc', 'sp' => '', 'city' => 'Lviv', 'cc' => 'UA',
+    'type' => 'loc', 'name' => 'Ivan Petrenko', 'sp' => '', 'city' => 'Lviv', 'cc' => 'UA',
 ]]]);
 $px = xp($pFake->written[0]);
 check('sp goes out as an empty element, which is what clears it', $px->query('//contact:addr/contact:sp')->length === 1
@@ -1269,11 +1269,33 @@ check('sp goes out as an empty element, which is what clears it', $px->query('//
 check('and the required parts travel with it', firstText($px, '//contact:addr/contact:city') === 'Lviv'
     && firstText($px, '//contact:addr/contact:cc') === 'UA');
 
-// org is the field the documentation names first, and it needs no address at all.
-$pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'org' => '']]]);
+// CLEARING AN ORG NEEDS THE WHOLE BLOCK TOO, AND THIS TEST USED TO ASSERT THE OPPOSITE.
+//
+// It read "clearing org alone sends no <addr> and needs no city" — built on RFC 5733, where each
+// child of chgPostalInfoType is optional and an omitted one looks like "no change". Against a
+// registry that REPLACES the block rather than merging it, a chg carrying only <contact:org/> comes
+// back **1000** with the contact left holding NO postalInfo at all — name, street, city, pc and cc
+// gone, both blocks. The green test was documenting a way to destroy a registrant's address.
+check(
+    'clearing org WITHOUT the rest of the block is refused — a registry that replaces would drop the address',
+    $argFails(static fn () => $pClient->contact()->update('C-1', ['chg' => ['postalInfo' => ['type' => 'loc', 'org' => '']]])),
+);
+// The BUILDER reaches the same code, and nothing checked that it did. A guard that only covers the
+// raw call leaves the more convenient path — the one the manual leads with — able to do the damage.
+check(
+    'and the builder is held to the same rule, not just the raw call',
+    $argFails(static fn () => $pClient->contact()->updateBuilder('C-1')
+        ->changeInternationalAddress(city: 'Lviv', countryCode: 'UA', org: '')
+        ->send()),
+);
+$pClient->contact()->update('C-1', ['chg' => ['postalInfo' => [
+    'type' => 'loc', 'name' => 'Ivan Petrenko', 'org' => '', 'city' => 'Lviv', 'cc' => 'UA',
+]]]);
 $ox = xp($pFake->written[1]);
-check('clearing org alone sends no <addr> and needs no city', $ox->query('//contact:addr')->length === 0
-    && $ox->query('//contact:postalInfo/contact:org')->length === 1);
+check('the complete form clears org AND carries the address', $ox->query('//contact:postalInfo/contact:org')->length === 1
+    && firstText($ox, '//contact:postalInfo/contact:org') === ''
+    && firstText($ox, '//contact:addr/contact:city') === 'Lviv'
+    && firstText($ox, '//contact:postalInfo/contact:name') === 'Ivan Petrenko');
 check('ValidationException is still an EppException', is_subclass_of(\EppTools\Exception\ValidationException::class, \EppTools\Exception\EppException::class));
 check('but NOT a ConfigException', !is_subclass_of(\EppTools\Exception\ValidationException::class, \EppTools\Exception\ConfigException::class));
 
@@ -1591,5 +1613,6 @@ check('a near-miss spelling is still refused, not silently dropped', $refused !=
 
 echo "\n$pass passed, $fail failed\n";
 exit($fail === 0 ? 0 : 1);
+
 
 

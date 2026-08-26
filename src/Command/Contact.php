@@ -244,52 +244,48 @@ final class Contact
      * Build one <contact:postalInfo>.
      *
      * @param array<string, mixed> $pi
-     * @param bool $partial on an update, PRESENCE decides. A key you leave out is not sent, so the
-     *        registry keeps what it holds; a key present but EMPTY is sent as an empty element,
-     *        which is how an optional field (org, sp, pc) is cleared. On a create every field is
-     *        sent, because there is nothing to merge with.
+     * @param bool $partial true inside <contact:chg>. The block is still sent WHOLE — see below; only
+     *        the optional children (org, sp, pc) distinguish "absent" from "present but empty", which
+     *        is how they are cleared.
      */
     private function appendPostalInfo(Frame $frame, \DOMElement $parent, array $pi, bool $partial = false): void
     {
         $block = $frame->ns($parent, Namespaces::CONTACT, 'contact:postalInfo', null, ['type' => (string) ($pi['type'] ?? 'int')]);
-        $send = static fn (string $key): bool => $partial ? array_key_exists($key, $pi) : true;
 
-        if ($send('name')) {
-            // WHICH FIELDS CAN BE EMPTIED IS FIXED BY THE SCHEMA, not by us. `name` is
-            // postalLineType, minLength 1, so there is NO WAY to clear a name — an empty element is
-            // schema-invalid and the server answers a bare 2001 naming no field. Refused here, where
-            // the message can say so.
-            self::requireNotEmpty($pi['name'] ?? '', 'name');
-            $frame->ns($block, Namespaces::CONTACT, 'contact:name', (string) $pi['name']);
+        // A postalInfo inside <contact:chg> REPLACES the stored one. It is not merged field by field.
+        //
+        // RFC 5733 can be read the other way: in chgPostalInfoType each of name/org/addr is optional,
+        // which looks like "omit it and the registry keeps what it holds". That reading is not safe.
+        // Against a registry that replaces, a chg carrying only <contact:org/> answers **1000** and
+        // leaves the contact with NO postalInfo at all — name, street, city, postal code and country
+        // gone, in both the int and loc blocks — and a complete block sent without an <org> removes
+        // the organisation just as surely.
+        //
+        // So the short form does not fail, it DESTROYS, and it reports success while doing it. A
+        // client cannot tell a replacing registry from a merging one, and the cost of guessing wrong
+        // is a registrant's postal address. Every change therefore carries the whole block.
+        foreach (['name', 'city', 'cc'] as $required) {
+            if (trim((string) ($pi[$required] ?? '')) === '') {
+                throw new ValidationException(sprintf(
+                    'postalInfo: a <contact:postalInfo> is REPLACED as a whole, not merged, so every change '
+                    . 'must carry the complete block — "%s" is missing. (A registry that replaces answers 1000 '
+                    . 'and silently drops everything you left out.) Read the current block with contact()->info() '
+                    . 'and send it back with your change applied.',
+                    $required,
+                ));
+            }
         }
+
+        // name is postalLineType, minLength 1: there is NO WAY to clear a name. An empty element is
+        // schema-invalid and the server answers a bare 2001 naming no field — refused here, where the
+        // message can say so.
+        self::requireNotEmpty($pi['name'] ?? '', 'name');
+        $frame->ns($block, Namespaces::CONTACT, 'contact:name', (string) $pi['name']);
+
         if ($partial ? array_key_exists('org', $pi) : !empty($pi['org'])) {
             // org is optPostalLineType, which HAS no minLength — so an empty one is legal and is
             // exactly how an organisation is removed.
             $frame->ns($block, Namespaces::CONTACT, 'contact:org', (string) ($pi['org'] ?? ''));
-        }
-
-        // <addr> is a sequence with required city and cc, so it is emitted whole or not at all.
-        $addrKeys = ['street', 'city', 'sp', 'pc', 'cc'];
-        $touchesAddr = !$partial || array_filter($addrKeys, static fn (string $k): bool => array_key_exists($k, $pi)) !== [];
-        if (!$touchesAddr) {
-            return;
-        }
-
-        // AND "WHOLE" MEANS THE CALLER HAS TO SUPPLY THE REQUIRED PARTS. This used to substitute an
-        // empty string for whatever was missing, so clearing one optional field — `['sp' => '']`,
-        // the documented way to remove a state — emitted <city/> and <cc/> alongside it. city is
-        // postalLineType (minLength 1) and cc is ccType (exactly 2 characters): the frame was
-        // schema-invalid, and what came back was a bare 2001 that names no element. A caller doing
-        // precisely what the manual told them to got an error that pointed at nothing.
-        foreach (['city', 'cc'] as $required) {
-            if (($pi[$required] ?? '') === '') {
-                throw new ValidationException(sprintf(
-                    'postalInfo: changing any part of the address means sending the whole <contact:addr>, '
-                    . 'and RFC 5733 makes "%s" a required part of it. Read the current address with '
-                    . 'contact()->info() and send city and cc back unchanged alongside what you are changing.',
-                    $required,
-                ));
-            }
         }
 
         $addr = $frame->ns($block, Namespaces::CONTACT, 'contact:addr');

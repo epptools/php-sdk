@@ -493,29 +493,44 @@ $client->contact()->updateBuilder('C-0001')
     ->send();
 ```
 
-### Inside an address, presence decides
+### An address is REPLACED, not merged
 
-The three states are distinct, and they are how a partial address change is expressed:
+The block you pass **replaces** the one the registry holds. It is not merged field by field, so
+anything you leave out is deleted:
 
 | What you write | What happens |
 |---|---|
-| omit the argument, or pass `null` | the field is not sent, and the registry keeps its value |
 | pass a value | the field is set to it |
-| pass `''` | the field is **cleared** — the only way to remove `org`, `stateProvince` or `postalCode` |
+| pass `''` | the field is **cleared** — the way to remove `org`, `stateProvince` or `postalCode` |
+| omit the argument, or pass `null` | the field is not sent — and the registry deletes what it held |
+
+RFC 5733 can be read as "leave it out and the registry keeps its value", since every child of
+`chgPostalInfoType` is optional, but that reading is not safe. Against a registry that replaces —
+**every command answering 1000** — a block sent without its `org` comes back with the organisation
+gone, and a block carrying only an `org` leaves the contact with no postal address at all: name,
+street, city, postal code and country.
+
+`name`, `city` and `countryCode` are required in every address change for that reason, and the
+builder refuses the call without them. They keep the frame valid; they cannot restore a field you did
+not pass. **Read the block first and pass it back with your change applied:**
 
 ```php
-// Move the contact to Lviv, clear the organisation, leave the name and street as they are.
+$current = $client->contact()->info('C-0001')->postalInfo()['int'];
+
+// Move the contact to Lviv and clear the organisation, keeping everything else as it was.
 $client->contact()->updateBuilder('C-0001')
-    ->changeInternationalAddress(city: 'Lviv', countryCode: 'UA', org: '')
+    ->changeInternationalAddress(
+        name: $current['name'],
+        city: 'Lviv',
+        countryCode: 'UA',
+        street: $current['street'] ?? null,
+        org: '',
+    )
     ->send();
 ```
 
-**Pass `city` and `countryCode` whenever you touch the address.** `<contact:addr>` is a schema
-sequence with both required, so it is emitted whole or not at all: the moment you mention `street`,
-`city`, `stateProvince`, `postalCode` or `countryCode`, the whole block goes out, and those two travel
-with it whether or not you supplied them. Omitting them there sends them empty.
-
-The form you do not mention — local or international — is untouched.
+The form you do not mention — local or international — is untouched: the two are addressed
+separately.
 
 ### There is no clearAuthInfo() here
 

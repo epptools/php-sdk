@@ -291,32 +291,47 @@ All the statuses in `addStatuses` go into one `<contact:add>` block and all of `
 one `<contact:rem>`, which is what the RFC 5733 schema allows — one of each, holding up to seven
 statuses.
 
-### The partial-update rule: presence decides
+### The update rule: a postal block is REPLACED, not merged
 
-Inside a postal block **presence is the whole semantics**, and there are three distinct states:
+Send a postal block in `chg` and the registry **replaces** the block it holds with the one you sent.
+The two are not merged field by field, so whatever you leave out is gone.
 
-| what you write | what happens |
+RFC 5733 can be read the other way: in `chgPostalInfoType` name, org and addr are each optional,
+which looks like "leave it out and the registry keeps what it holds". That reading is not safe.
+Against a registry that replaces, **every one of these commands answers 1000**:
+
+| what the `chg` carried | what the contact had afterwards |
 |---|---|
-| the key is absent | the field is not sent, and the registry keeps what it holds |
-| the key holds a value | the field is set to that value |
-| the key holds `''` | the field is **cleared** — the only way to remove `org`, `sp` or `pc` |
+| the complete block with `'org' => ''` | organisation removed, address untouched |
+| the complete block with no `org` key | organisation **also removed** |
+| `['org' => '']` and nothing else | **no postal block at all** — name, street, city, postal code and country gone |
+
+So there is no such thing as changing one field of an address, and the failure is silent: the command
+succeeds and the data is gone. `name`, `city` and `cc` are required in every postal change and this
+SDK refuses the call without them, but that guard only keeps the frame schema-valid — it cannot put
+back an `org`, an `sp` or a `pc` you did not send.
+
+**Read the block, apply your change, send it back whole:**
 
 ```php
-// Change the city, clear the organisation, leave the name and street exactly as they are.
+$current = $client->contact()->info('acme-01')->postalInfo()['int'];
+
+// Change the city and clear the organisation, keeping everything else exactly as it was.
 $client->contact()->update('acme-01', [
-    'chg' => ['postalInfo' => [
-        'type' => 'int',
-        'city' => 'Lviv',
-        'cc'   => 'UA',
-        'org'  => '',      // cleared
-    ]],
+    'chg' => ['postalInfo' => ['type' => 'int', 'city' => 'Lviv', 'org' => ''] + $current],
 ]);
 ```
 
-**Give `city` and `cc` whenever you touch the address.** `<contact:addr>` is a schema sequence with
-both of them required, so it is emitted whole or not at all: the moment you mention `street`, `city`,
-`sp`, `pc` or `cc`, the whole block goes out, and `city` and `cc` travel with it whether or not you
-supplied them. Omitting them there sends them empty.
+One thing the replacement does *not* reach is the other postal form: `int` and `loc` are addressed
+separately, so replacing one leaves the other exactly as it was.
+
+Inside the block you send, an empty string is still what clears an optional field:
+
+| what you write | what happens |
+|---|---|
+| the key holds a value | the field is set to that value |
+| the key holds `''` | the field is **cleared** — the way to remove `org`, `sp` or `pc` |
+| the key is absent | the field is not sent — and the registry deletes what it held |
 
 Change both forms in one command with `postalInfos`:
 

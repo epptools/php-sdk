@@ -27,18 +27,26 @@ final class ContactUpdateBuilder extends Builder
     }
 
     /**
-     * Change the ASCII address. Only the fields you pass are sent.
+     * Change the ASCII address.
      *
-     * PRESENCE is what decides, and the three states are distinct:
+     * THE BLOCK YOU PASS REPLACES THE ONE THE REGISTRY HOLDS. It is not merged field by field, so
+     * anything you leave out is deleted:
      *
-     *   omit the argument (or pass null)  the field is not sent, and the registry keeps its value
      *   pass a value                      the field is set to it
      *   pass an empty string              the field is CLEARED — this is how org, stateProvince
-     *                                     and postalCode are removed, and the only way to do it
+     *                                     and postalCode are removed
+     *   omit the argument (or pass null)  the field is not sent, and the registry DELETES what it held
      *
-     * The other form (local or international, whichever you are not changing) is untouched. The
-     * address block is a sequence with a required city and country, so passing any part of it
-     * sends the whole block: give city and countryCode whenever you touch street, sp or pc.
+     * RFC 5733 can be read as "leave it out and the registry keeps its value", since every child of
+     * chgPostalInfoType is optional, but that reading is not safe: against a registry that replaces,
+     * a block sent without its org comes back 1000 with the org gone, and a block carrying only an
+     * org leaves the contact with no postal address at all. name, city and countryCode are required
+     * here for that reason — but they only keep the frame valid, they cannot restore a field you did
+     * not send. Read the current block with contact()->info() and pass it back with your change
+     * applied.
+     *
+     * The other form (local or international, whichever you are not changing) IS untouched — the
+     * two are addressed separately.
      *
      * @param string[]|null $street
      */
