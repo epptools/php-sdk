@@ -1498,6 +1498,48 @@ $trnRes = EppTools\Response::fromXml($infData(
 check('a transfer notice carries the counterparty and the deadline', ($trnRes->transfer() ?? [])['requestedBy'] === 'ACME'
     && ($trnRes->transfer() ?? [])['actBy'] === '2026-08-21T09:00:00Z');
 
+// RFC 8590. A notice about something the registry did to your object arrives as a sentence in the
+// language of your account, which no program can rely on; this is the same event as data.
+$chgRes = EppTools\Response::fromXml(
+    '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
+    . '<result code="1301"><msg>Command completed successfully; ack to dequeue</msg></result>'
+    . '<msgQ count="1" id="217"><qDate>2026-08-27T09:15:00Z</qDate>'
+    . '<msg lang="uk">Домен більше не існує в реєстрі.</msg></msgQ>'
+    . '<resData><domain:infData xmlns:domain="urn:ietf:params:xml:ns:domain-1.0">'
+    . '<domain:name>gone.com.ua</domain:name><domain:roid>D-9001</domain:roid>'
+    . '</domain:infData></resData>'
+    . '<extension><changePoll:changeData xmlns:changePoll="urn:ietf:params:xml:ns:changePoll-1.0" state="before">'
+    . '<changePoll:operation>delete</changePoll:operation>'
+    . '<changePoll:date>2026-08-27T09:15:00Z</changePoll:date>'
+    . '<changePoll:svTRID>SRV-1</changePoll:svTRID>'
+    . '<changePoll:who>Registry</changePoll:who>'
+    . '<changePoll:reason>deleted</changePoll:reason>'
+    . '</changePoll:changeData></extension>'
+    . '<trID><clTRID>C1</clTRID><svTRID>S1</svTRID></trID></response></epp>',
+);
+$chg = $chgRes->change() ?? [];
+check('a change notice says what happened, without reading the sentence',
+    $chg['operation'] === 'delete' && $chg['who'] === 'Registry' && $chg['reason'] === 'deleted');
+// Which way resData reads. A domain that no longer exists can only be described as it last was, and
+// treating that as its CURRENT state is how a client resurrects a deleted object in its own store.
+check('and which way the object beside it reads', $chg['state'] === 'before'
+    && $chgRes->objectName() === 'gone.com.ua');
+
+// The attribute is optional and 'after' is the schema default, so an omitted state is not "unknown".
+$chgDefault = EppTools\Response::fromXml($infData(
+    '<changePoll:changeData xmlns:changePoll="urn:ietf:params:xml:ns:changePoll-1.0">'
+    . '<changePoll:operation op="sync">custom</changePoll:operation>'
+    . '<changePoll:date>2026-08-27T09:15:00Z</changePoll:date>'
+    . '<changePoll:svTRID>SRV-2</changePoll:svTRID><changePoll:who>CSR</changePoll:who>'
+    . '</changePoll:changeData>',
+));
+check('an omitted state means after, and a custom operation keeps its own verb',
+    ($chgDefault->change() ?? [])['state'] === 'after'
+    && ($chgDefault->change() ?? [])['op'] === 'sync'
+    && ($chgDefault->change() ?? [])['reason'] === '');
+
+check('a response with no change block reports none', $trnRes->change() === null);
+
 $chkRes = EppTools\Response::fromXml(
     '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
     . '<result code="1000"><msg>ok</msg></result><resData>'

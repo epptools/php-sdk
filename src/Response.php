@@ -1022,6 +1022,49 @@ final class Response
         ];
     }
 
+    /**
+     * What the registry did to one of your objects without you asking — RFC 8590 change poll.
+     *
+     * A poll notice about a server-initiated change carries a human sentence in `<msg>`, and that
+     * sentence is written in your account's notification language. This is the same event stated so
+     * that code can act on it: the object is in `<resData>` as usual, and this returns the change
+     * itself.
+     *
+     * `state` says which way `<resData>` reads: `before` describes the object as it last was (a
+     * domain that no longer exists cannot be described any other way), `after` describes it as it
+     * now is. `who` is free text for audit and the server chooses what to put there — a role, a
+     * name or an identifier. `Registry` means the change came from the registry side rather than
+     * from your account. `reason` is the registry's own finer name for the event where it has one,
+     * which may be more specific than `operation`.
+     *
+     * Null when the response carries no change block — including when you did not announce
+     * `urn:ietf:params:xml:ns:changePoll-1.0` at login, since a server sends this only to a client
+     * that asked for it.
+     *
+     * @return array{operation: string, op: string, state: string, date: string, svTRID: string, who: string, reason: string}|null
+     */
+    public function change(): ?array
+    {
+        $el = $this->xpath->query('//*[local-name()="changeData"]')->item(0);
+        if (!$el instanceof \DOMElement) {
+            return null;
+        }
+        $operation = $el->getElementsByTagNameNS('*', 'operation')->item(0);
+
+        return [
+            'operation' => $this->childText($el, 'operation'),
+            // The `op` attribute qualifies a `custom` operation with the registry's own verb; empty
+            // for every operation the RFC enumerates, which is most of them.
+            'op'        => $operation instanceof \DOMElement ? $operation->getAttribute('op') : '',
+            // 'after' is the schema default, so a server that omits the attribute means 'after'.
+            'state'     => $el->getAttribute('state') !== '' ? $el->getAttribute('state') : 'after',
+            'date'      => $this->childText($el, 'date'),
+            'svTRID'    => $this->childText($el, 'svTRID'),
+            'who'       => $this->childText($el, 'who'),
+            'reason'    => $this->childText($el, 'reason'),
+        ];
+    }
+
     /** Your credit limit, or null when the response carries no balance block. */
     public function creditLimit(): ?string
     {

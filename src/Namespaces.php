@@ -33,6 +33,11 @@ final class Namespaces
     public const RGP = 'urn:ietf:params:xml:ns:rgp-1.0';       // RFC 3915
     public const FEE = 'urn:ietf:params:xml:ns:epp:fee-1.0';   // RFC 8748 (prices)
     public const LOGINSEC = 'urn:ietf:params:xml:ns:epp:loginSec-1.0'; // RFC 8807 (login security)
+    // RFC 8590 (change poll). Purely inbound: a client never sends changeData — a server attaches it
+    // to a poll notice about a change it made to your objects. Announce it at login to receive it;
+    // a server that offers it advertises the URI in its greeting, and this library mirrors the
+    // greeting into <svcs> unless Config::$extUris overrides that.
+    public const CHANGEPOLL = 'urn:ietf:params:xml:ns:changePoll-1.0';
 
     /**
      * Value placed in <pw> / <newPW> to indicate that the real password is carried in
