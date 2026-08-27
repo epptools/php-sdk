@@ -1540,6 +1540,40 @@ check('an omitted state means after, and a custom operation keeps its own verb',
 
 check('a response with no change block reports none', $trnRes->change() === null);
 
+// EVERY VERSION THIS PACKAGE STATES ABOUT ITSELF AGREES WITH ITS OWN VERSION.
+//
+// The install instructions offer a GitHub alternative "pinned to a release tag", which has to name
+// a version — and so goes stale at the next release, silently, in three languages at once. It did:
+// README told people to install v1.0.2 while the library was 1.1.0, and the manuals still said
+// 1.0.0 from two releases before that. A reader following the documented line got an older library
+// than the one the same page describes.
+//
+// Nothing keeps that in step except something that fails when it drifts. Only x.y.z strings that
+// LOOK like this package's version are considered, so PHP version floors, RFC numbers and the
+// changelog's history of older releases are untouched.
+$docFiles = [dirname(__DIR__) . '/README.md'];
+$docDir = dirname(__DIR__) . '/docs';
+if (is_dir($docDir)) {
+    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($docDir));
+    foreach ($it as $entry) {
+        if ($entry->isFile() && $entry->getExtension() === 'md' && $entry->getFilename() !== 'CHANGELOG.md') {
+            $docFiles[] = $entry->getPathname();
+        }
+    }
+}
+$staleVersions = [];
+foreach ($docFiles as $docFile) {
+    preg_match_all('/(?<![\d.])1\.\d+\.\d+(?![\d.])/', (string) file_get_contents($docFile), $found);
+    foreach ($found[0] as $seen) {
+        if ($seen !== EppTools\Client::VERSION) {
+            $staleVersions[] = basename($docFile) . ": $seen";
+        }
+    }
+}
+check('every documented version is ' . EppTools\Client::VERSION
+    . ($staleVersions !== [] ? ' — stale: ' . implode(', ', array_slice($staleVersions, 0, 4)) : ''),
+    $staleVersions === []);
+
 $chkRes = EppTools\Response::fromXml(
     '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
     . '<result code="1000"><msg>ok</msg></result><resData>'

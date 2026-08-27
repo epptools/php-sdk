@@ -46,7 +46,7 @@ final class Client
     private const PW_MAX_LOGINSEC = 128;
 
     /** Client version, sent to the server as <loginSec:app> when RFC 8807 is in use. */
-    public const VERSION = '1.1.0';
+    public const VERSION = '1.1.1';
 
     private Config $config;
     private Transport $connection;

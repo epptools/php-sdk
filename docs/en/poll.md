@@ -220,6 +220,40 @@ Same element as the [balance query](balance.md), so the same accessors read it. 
 balance runs out, chargeable commands are refused with `2104` and a registration you were about to
 make fails for want of funds rather than for anything wrong with the request.
 
+### A change the registry made to your object (RFC 8590)
+
+Some notices describe something that happened to one of your objects without you asking: it stopped
+existing at the registry, or it left on a transfer. These are the ones you have to act on
+automatically — stop billing it, tell your customer, drop it from your own store — and the `<msg>`
+they carry is written in your account's notification language, so nothing in it is safe to parse.
+
+```php
+$chg = $notice->change();
+if ($chg !== null) {
+    $chg['operation'];   // 'delete' | 'transfer' | 'renew' | 'update' | 'restore' | 'autoRenew' | …
+    $chg['state'];       // 'before' | 'after'
+    $chg['who'];         // 'Registry'
+    $chg['date'];
+    $chg['svTRID'];
+    $chg['reason'];
+    $notice->objectName();
+}
+```
+
+**`state` says which way the object beside it reads.** `after` describes the object as it now is.
+`before` describes it as it last was — the only way a domain that no longer exists *can* be
+described. Writing a `before` block into your own store as the object's current state is how a
+deleted domain comes back to life in your records, so branch on it before you save anything.
+
+`change()` returns nothing when the notice carries no change block — which includes every notice if
+you did not announce `urn:ietf:params:xml:ns:changePoll-1.0` at login. This library mirrors the
+server's greeting into `<svcs>`, so a registry that offers it is announced for you.
+
+Unlike the relocation rule below, announcing **nothing** does not get you `changeData`: a registry
+sends it only to a client that named the namespace, because a client that has never seen it may
+refuse the whole frame. The `<msg>` sentence is unchanged either way, so opting in never removes
+anything you already read.
+
 ### A payload from an extension you did not announce (RFC 9038)
 
 A notice is written into your queue before the registry knows which session will collect it, so it
