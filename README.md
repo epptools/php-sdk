@@ -30,7 +30,7 @@ Or straight from GitHub, pinned to a release tag, if you would rather not depend
 
 ```bash
 composer config repositories.epptools vcs https://github.com/epptools/php-sdk
-composer require epptools/sdk:^1.0
+composer require epptools/sdk:^1.1
 ```
 
 No Composer at all? Clone the repo and `require __DIR__ . '/php-sdk/autoload.php';` — it registers
