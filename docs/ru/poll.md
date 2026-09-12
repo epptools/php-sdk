@@ -165,6 +165,7 @@ $client->poll()->drain(function (Response $notice): void {
 |---|---|---|
 | Трансфер запрошен / подтверждён / отклонён / отменён | `trnData` | `transfer()`, `transferStatus()`, `objectName()` |
 | Домен зарегистрирован, продлён, удалён; итог восстановления | `infData` | `objectName()`, `expiryDate()`, `statuses()`, `rgpStatus()` |
+| Регистрация, дошедшая до реестра и ожидающая решения ТАМ | `creData` | `objectName()`, `createdDate()`, `expiryDate()` |
 | Итог отложенной (`1001`) операции | `panData` | `pendingActionData()` |
 | Низкий баланс | `balance:infData` | `balance()`, `currentBalance()` |
 

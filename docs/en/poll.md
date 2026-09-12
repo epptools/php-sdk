@@ -163,6 +163,7 @@ response, so one parser serves both.
 |---|---|---|
 | Transfer requested / approved / rejected / cancelled | `trnData` | `transfer()`, `transferStatus()`, `objectName()` |
 | Domain registered, renewed, deleted; restore outcome | `infData` | `objectName()`, `expiryDate()`, `statuses()`, `rgpStatus()` |
+| A registration that reached the registry and is pending THERE | `creData` | `objectName()`, `createdDate()`, `expiryDate()` |
 | The outcome of a deferred (`1001`) operation | `panData` | `pendingActionData()` |
 | Low balance | `balance:infData` | `balance()`, `currentBalance()` |
 
