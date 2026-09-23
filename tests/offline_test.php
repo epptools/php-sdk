@@ -341,14 +341,20 @@ try {
 }
 check('contact create without email throws ValidationException (an EppException)', $emailThrew);
 
-echo "domain:update restore (rgp, no add/rem/chg)\n";
+echo "domain:update restore (rgp, plus the empty domain:chg RFC 3915 requires)\n";
 [$client, $fake] = makeClient([$GREETING, $OK()]);
 $client->connect();
 $client->domain()->restore('redeem.com.ua');
 $ux = xp($fake->written[0]);
 check('restore rgp op=request', $ux->query('//e:extension/rgp:update/rgp:restore[@op="request"]')->length === 1);
-check('restore has no domain:chg', $ux->query('//domain:chg')->length === 0);
-check('restore has no domain:add', $ux->query('//domain:add')->length === 0);
+// RFC 3915 section 4.2.5: "at least one empty <domain:add>, <domain:rem>, or <domain:chg> element
+// MUST be present if this extension is specified within an <update> command", and the RFC's own
+// example uses <domain:chg/>. This pair of assertions said the element must be ABSENT, so the suite
+// was pinning the omission in place: a domain:update with a name and no delta at all, which a server
+// may read as a no-op and refuse while the redemption window keeps running.
+check('restore carries the empty domain:chg RFC 3915 requires', $ux->query('//domain:chg')->length === 1);
+check('and it is empty — a restore changes nothing about the domain', $ux->query('//domain:chg/*')->length === 0);
+check('one of the three is enough, so there is still no domain:add', $ux->query('//domain:add')->length === 0);
 
 echo "domain:renew accepts an exDate timestamp for curExpDate\n";
 // The value that reaches a caller's hands is <exDate>, an xs:dateTime; the value the wire wants is
@@ -641,6 +647,24 @@ check('balance() creditLimit', $b !== null && $b['creditLimit'] === '0.00');
 check('balance() balance', $b !== null && $b['balance'] === '1234.56');
 check('balance() availableCredit', $b !== null && $b['availableCredit'] === '1234.56');
 check('messageLang() reads uk', $bal->messageLang() === 'uk');
+// THE LOW-BALANCE NOTICE IS THE ONE FRAME A REGISTRAR CANNOT RE-REQUEST, and balance-1.0.xsd makes
+// every field optional so that such a notice may carry only <balance> and <threshold>. Reading only
+// creditLimit and availableCredit made balance() return null for exactly that frame: the caller's
+// branch never ran, the notice fell through to whatever handles the unrecognised, and once acked it is
+// gone - the registry keeps no copy. The threshold is also the only thing that says WHY it fired, and
+// nothing could read it.
+$lowXml = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
+    . '<result code="1301"><msg>Command completed successfully; ack to dequeue</msg></result>'
+    . '<msgQ count="1" id="7"><qDate>2026-09-23T04:00:00Z</qDate><msg>Low balance</msg></msgQ>'
+    . '<resData><balance:infData xmlns:balance="http://sandbox.invalid/epp/balance-1.0">'
+    . '<balance:balance>120.50</balance:balance><balance:threshold>500.00</balance:threshold>'
+    . '</balance:infData></resData><trID><svTRID>SRV-9</svTRID></trID></response></epp>';
+$low = \EppTools\Response::fromXml($lowXml);
+check('a notice carrying only balance and threshold is still a balance answer', $low->balance() !== null);
+check('and its figure is readable', $low->currentBalance() === '120.50');
+check('and the threshold that fired it is readable', $low->threshold() === '500.00');
+check('a plain balance answer has no threshold', $bal->threshold() === null);
+
 
 $infoXml = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
     . '<result code="1000"><msg lang="en">Command completed successfully</msg></result>'
@@ -817,6 +841,14 @@ check('but the password is NOT relocated into it', $sx->query('//ls:loginSec/ls:
 check('the userAgent names app, tech and os', $sx->query('//ls:userAgent/ls:app')->length === 1
     && $sx->query('//ls:userAgent/ls:tech')->length === 1
     && $sx->query('//ls:userAgent/ls:os')->length === 1);
+// And <os> carries the SHAPE RFC 8807 section 3.1 asks for: the system "with version if
+// available", as arch SP name SP version. The four runtimes name the same machine differently -
+// amd64 / AMD64 / x64 - so the exact string cannot be asserted here or compared across the
+// libraries. What can be asserted is that it is not a single token: process.platform's win32 is a
+// build target, not an operating system, and says nothing about architecture or version.
+$osText = $sx->query('//ls:userAgent/ls:os')->item(0)->textContent;
+check('and <os> carries more than one token, as RFC 8807 asks',
+    substr_count(trim($osText), ' ') >= 1 && !str_contains($osText, '  '));
 
 echo "login: loginSecurity=false stays off the extension entirely\n";
 [$offClient, $offFake] = makeClient([$GREETING_LOGINSEC, $OK()], config: ['loginSecurity' => false]);
@@ -1230,6 +1262,56 @@ check('a disclose field that does not exist', $argFails(static fn () => $vClient
 check('removing all DNSSEC and naming records at once', $argFails(static fn () => $vClient->domain()->updateBuilder('x.ua')->removeAllDnssec()->remDsRecord(1, 8, 2, 'AB')));
 check('an unknown option key', $argFails(static fn () => $vClient->domain()->create('x.ua', ['yeras' => 1])));
 
+echo "period: 0 years means one thing on a transfer and nothing anywhere else\n";
+// A zone whose transfers are free states its policy as "the term does not move", and a registry
+// whose validator wants that says so in its error: "transfer period for this zone must be 0". But
+// RFC 5731's periodType is 1..99, so <domain:period>0</domain:period> is a frame the schema refuses
+// — the value the operator asks for cannot be written down. Both are satisfied by leaving the
+// element out, which is what an absent period already means: apply the zone's own policy.
+[$p0Client, $p0Fake] = makeClient([$GREETING, $OK()]);
+$p0Client->connect();
+$p0Client->domain()->transfer('request', 'free.biz.ua', 'auth-1', 0);
+check('transfer with 0 years omits the period rather than writing an invalid one',
+    !str_contains($p0Fake->written[0], 'domain:period'));
+check('transfer with 0 years still carries the name and the secret',
+    str_contains($p0Fake->written[0], '<domain:name>free.biz.ua</domain:name>')
+    && str_contains($p0Fake->written[0], '<domain:pw>auth-1</domain:pw>'));
+
+[$p1Client, $p1Fake] = makeClient([$GREETING, $OK()]);
+$p1Client->connect();
+$p1Client->domain()->transfer('request', 'paid.com.ua', 'auth-1', 1);
+check('a zone that bundles a renewal still gets its period',
+    str_contains($p1Fake->written[0], '<domain:period unit="y">1</domain:period>'));
+
+// The bound is the schema's, so it is refused for every command that carries a period — and a
+// create or a renew has no reading of 0 under which the caller meant something.
+check('100 years on a transfer', $argFails(static fn () => $vClient->domain()->transfer('request', 'x.ua', 'a', 100)));
+check('0 years on a create', $argFails(static fn () => $vClient->domain()->create('x.ua', ['years' => 0])));
+check('0 years on a renew', $argFails(static fn () => $vClient->domain()->renew('x.ua', '2027-04-01', 0)));
+// An e-mail is not among the clearable contact fields: RFC 5733 types it minTokenType (minLength 1).
+// contact:create refused an empty one from the start; contact:update emitted it, and an empty
+// <contact:email/> is a schema-invalid frame answered with a bare 2001 that names no element.
+check('clearing a contact e-mail on update',
+    $argFails(static fn () => $vClient->contact()->update('C-1', ['chg' => ['email' => '']])));
+check('and through the builder, which is the same command',
+    $argFails(static fn () => $vClient->contact()->updateBuilder('C-1')->changeEmail('')->send()));
+// A blank status is not a status. statusValueType is an enumeration, so "" is not a member of it and
+// <contact:status s=""/> is a schema-invalid frame - which is why every list step in every builder
+// drops blanks. This one did not, and built a frame the other three refused to build.
+[$stClient, $stFake] = makeClient([$GREETING, $OK()]);
+$stClient->connect();
+$stClient->contact()->updateBuilder('C-1')->addStatus('', '  ', 'clientUpdateProhibited')->send();
+// secDNS on a create carries records; on an update it carries a delta. Each command must refuse the
+// OTHER's keys, because accepting them is worse than refusing them: a create that accepted 'add'
+// would read neither dsData nor keyData and register the domain UNSIGNED behind a 1000.
+check('an update-only DNSSEC key on a create',
+    $argFails(static fn () => $vClient->domain()->create('x.ua', ['secDNS' => ['add' => ['dsData' => []]]])));
+check('a create-only DNSSEC key on an update',
+    $argFails(static fn () => $vClient->domain()->update('x.ua', ['secDNS' => ['dsData' => []]])));
+check('a blank contact status contributes nothing',
+    substr_count($stFake->written[0], '<contact:status') === 1
+    && str_contains($stFake->written[0], 's="clientUpdateProhibited"'));
+
 echo "contact: which postal fields can be CLEARED is the schema's decision, not ours\n";
 // contact-1.0.xsd: optPostalLineType (org, street, sp) and pcType have no minLength, so those clear
 // by being sent empty. postalLineType (name, city) has minLength 1 and ccType is exactly two
@@ -1563,7 +1645,9 @@ if (is_dir($docDir)) {
 }
 $staleVersions = [];
 foreach ($docFiles as $docFile) {
-    preg_match_all('/(?<![\d.])1\.\d+\.\d+(?![\d.])/', (string) file_get_contents($docFile), $found);
+    // A following DIGIT disqualifies a match so 1.1.10 is not read as 1.1.1; a following DOT does not,
+    // because epptools-sdk-1.1.1.jar in an install line is exactly the stale version this looks for.
+    preg_match_all('/(?<![\d.])1\.\d+\.\d+(?!\d)/', (string) file_get_contents($docFile), $found);
     foreach ($found[0] as $seen) {
         if ($seen !== EppTools\Client::VERSION) {
             $staleVersions[] = basename($docFile) . ": $seen";
@@ -1686,6 +1770,381 @@ try {
     $refused = $e;
 }
 check('a near-miss spelling is still refused, not silently dropped', $refused !== null);
+
+echo "hello: the keep-alive must not store a frame that is not a greeting\n";
+// hello() is the documented keep-alive, so it is the call a long-lived worker makes on a timer. A
+// <response> stored as the greeting advertises no services, so the next login() falls back to the
+// DEFAULT list: it announces services the server may not offer and loses the extensions it does —
+// the registry's own among them, after which a licence create, a forced host delete and balance()
+// all throw and change() stops arriving.
+$halfOpen = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
+    . '<result code="2500"><msg>Session closing</msg></result><trID><svTRID>SRV-X</svTRID></trID></response></epp>';
+[$helloClient, $helloFake] = makeClient([$GREETING, $halfOpen, $GREETING]);
+$helloClient->connect();
+$beforeHello = $helloClient->greeting();
+$helloThrew = null;
+try {
+    $helloClient->hello();
+} catch (\EppTools\Exception\ConnectionException $e) {
+    $helloThrew = $e->getMessage();
+}
+check('a non-greeting reply to <hello> is refused', $helloThrew !== null);
+check('and the message says which host and what came back instead',
+    $helloThrew !== null && str_contains($helloThrew, 'epp.example') && str_contains($helloThrew, '2500'));
+// The session keeps working: the service list it logged in against is still the server's own.
+check('the greeting already held is kept, not overwritten', $helloClient->greeting() === $beforeHello);
+check('so the registry extension still resolves after a bad hello', $helloClient->registryExtUri() === EXT_REGISTRY);
+check('the <hello> frame itself is what went out', str_contains($helloFake->written[0], '<hello/>'));
+// A good one still replaces it, which is the whole point of a keep-alive.
+$fresh = $helloClient->hello();
+check('a real greeting is accepted and stored', $fresh->isGreeting() && $helloClient->greeting() === $fresh);
+
+echo "secDNS: dsData and keyData are alternatives, not a pair (RFC 5910)\n";
+// RFC 5910 sections 2 and 4: the two MUST NOT be mixed except when keyData is nested inside dsData.
+// secDNS-1.1.xsd writes that as a choice, so a block carrying one of each is a frame the registry
+// refuses — and the domain is left unsigned, or left signed with the keys it already had while the
+// caller believes the roll went through. Five paths reach the same emitter, so all five are checked.
+$dsDigest = 'ABCDEF0123456789ABCDEF0123456789ABCDEF01';
+$mixedSec = ['dsData' => [['keyTag' => 12345, 'alg' => 8, 'digestType' => 2, 'digest' => $dsDigest]],
+    'keyData' => [['flags' => 257, 'protocol' => 3, 'alg' => 8, 'pubKey' => 'AwEAAcBQ']]];
+check('a create carrying both lists', $argFails(static fn () => $vClient->domain()->create('x.ua', ['secDNS' => $mixedSec])));
+check('an update add carrying both', $argFails(static fn () => $vClient->domain()->update('x.ua', ['secDNS' => ['add' => $mixedSec]])));
+check('an update rem carrying both', $argFails(static fn () => $vClient->domain()->update('x.ua', ['secDNS' => ['rem' => $mixedSec]])));
+check('the builder reaching it with dsRecord() + keyRecord()',
+    $argFails(static fn () => $vClient->domain()->createBuilder('x.ua')->dsRecord(12345, 8, 2, $dsDigest)->keyRecord(257, 3, 8, 'AwEAAcBQ')->send()));
+check('and dsRecordWithKey() plus a separate keyRecord()',
+    $argFails(static fn () => $vClient->domain()->createBuilder('x.ua')
+        ->dsRecordWithKey(12345, 8, 2, $dsDigest, 257, 3, 8, 'AwEAAcBQ')->keyRecord(257, 3, 8, 'AwEAAcBQ')->send()));
+// The nested form ALONE is the one legal combination and must keep working, or the fix has removed a
+// feature instead of a defect.
+[$nestClient, $nestFake] = makeClient([$GREETING, $OK()]);
+$nestClient->connect();
+$nestClient->domain()->createBuilder('nested.ua')->registrant('REG-0001')
+    ->dsRecordWithKey(12345, 8, 2, $dsDigest, 257, 3, 8, 'AwEAAcBQ')->send();
+$nestXp = xp($nestFake->written[0]);
+check('a DS record carrying its own DNSKEY is still built', $nestXp->query('//secDNS:dsData/secDNS:keyData')->length === 1);
+check('and nothing sits beside the dsData', $nestXp->query('//secDNS:create/secDNS:keyData')->length === 0);
+
+echo "blanks and nulls are dropped by the COMMAND, not only by the builder\n";
+// Every builder list step trimmed and dropped blanks; every direct call emitted what it was given.
+// Each of these is a frame the schema refuses: statusValueType is an enumeration with no empty
+// member, domain:hostObj has minLength 1, host:addr and domain:hostAddr minLength 3. One blank entry
+// — a stray comma in a form field — costs the whole command, including the entries that were right.
+[$blankClient, $blankFake] = makeClient([$GREETING, $OK(), $OK(), $OK(), $OK(), $OK()]);
+$blankClient->connect();
+$blankClient->domain()->update('blank.ua', ['add' => ['statuses' => ['clientHold', '', '  ', null]]]);
+$bx = xp($blankFake->written[0]);
+check('a blank domain status contributes nothing', $bx->query('//domain:status')->length === 1
+    && firstText($bx, '//domain:add/domain:status/@s') === 'clientHold');
+$blankClient->domain()->create('blank.ua', ['registrant' => 'REG-0001', 'nameservers' => ['ns1.blank.ua', '', '  ']]);
+$bx2 = xp($blankFake->written[1]);
+check('a blank nameserver contributes no empty hostObj', $bx2->query('//domain:ns/domain:hostObj')->length === 1);
+$blankClient->host()->create('ns1.blank.ua', ['192.0.2.1', '', '  ']);
+$bx3 = xp($blankFake->written[2]);
+check('a blank glue address contributes no empty host:addr', $bx3->query('//host:addr')->length === 1);
+$blankClient->host()->update('ns1.blank.ua', ['addAddresses' => ['', ' '], 'addStatuses' => ['clientUpdateProhibited', '']]);
+$bx4 = xp($blankFake->written[3]);
+check('a host:add of nothing but blanks still opens no empty element', $bx4->query('//host:add/host:addr')->length === 0
+    && $bx4->query('//host:add/host:status')->length === 1);
+$blankClient->contact()->update('REG-0001', ['addStatuses' => ['', 'clientUpdateProhibited']]);
+$bx5 = xp($blankFake->written[4]);
+check('a blank contact status contributes nothing from the raw call either',
+    $bx5->query('//contact:add/contact:status')->length === 1);
+// A list of nothing BUT blanks must not open a childless <domain:ns/>, which is refused in its own right.
+[$allBlankClient, $allBlankFake] = makeClient([$GREETING, $OK()]);
+$allBlankClient->connect();
+$allBlankClient->domain()->create('empty-ns.ua', ['registrant' => 'REG-0001', 'nameservers' => ['', '  ']]);
+check('a nameserver list of nothing but blanks opens no <domain:ns>',
+    xp($allBlankFake->written[0])->query('//domain:ns')->length === 0);
+// nameserverWithGlue() was the one builder step with no filter of its own.
+[$glueBlankClient, $glueBlankFake] = makeClient([$GREETING, $OK()]);
+$glueBlankClient->connect();
+$glueBlankClient->domain()->createBuilder('glue-blank.ua')->registrant('REG-0001')
+    ->nameserverWithGlue('ns1.glue-blank.ua', '192.0.2.1', '', '  ')->send();
+check('nameserverWithGlue() drops a blank glue address',
+    xp($glueBlankFake->written[0])->query('//domain:hostAttr/domain:hostAddr')->length === 1);
+// The glue entry's own keys are checked inside it: `nmae` left a hostAttr named nothing, and
+// `address` for `addresses` threw the glue away — either way a delegation that cannot resolve.
+check('a misspelled key inside a glue entry is refused',
+    $argFails(static fn () => $vClient->domain()->create('x.ua', ['nameservers' => [['nmae' => 'ns1.x.ua', 'addresses' => ['192.0.2.1']]]])));
+
+echo "maxSigLife is bounded, the way a period is (RFC 5910)\n";
+// secDNS-1.1.xsd restricts maxSigLifeType to minInclusive 1, so a 0 does not mean "no limit" and a
+// negative means nothing at all: both are frames the schema refuses, and the whole DNSSEC change
+// goes with them behind a bare 2001 that names no element.
+$signed = ['dsData' => [['keyTag' => 1, 'alg' => 8, 'digestType' => 2, 'digest' => $dsDigest]]];
+check('0 seconds on a create', $argFails(static fn () => $vClient->domain()->create('x.ua', ['secDNS' => ['maxSigLife' => 0] + $signed])));
+check('a negative lifetime', $argFails(static fn () => $vClient->domain()->create('x.ua', ['secDNS' => ['maxSigLife' => -5] + $signed])));
+check('something that is not a number at all', $argFails(static fn () => $vClient->domain()->create('x.ua', ['secDNS' => ['maxSigLife' => 'forever'] + $signed])));
+check('0 seconds on an update', $argFails(static fn () => $vClient->domain()->update('x.ua', ['secDNS' => ['maxSigLife' => 0]])));
+check('and through the builder, which is the same command',
+    $argFails(static fn () => $vClient->domain()->createBuilder('x.ua')->dsRecord(1, 8, 2, $dsDigest)->maxSigLife(0)->send()));
+check('the message names the bound and the RFC', (static function () use ($vClient, $signed): bool {
+    try {
+        $vClient->domain()->create('x.ua', ['secDNS' => ['maxSigLife' => 0] + $signed]);
+    } catch (\EppTools\Exception\ValidationException $e) {
+        return str_contains($e->getMessage(), 'RFC 5910') && str_contains($e->getMessage(), '1 or more');
+    }
+
+    return false;
+})());
+// A real lifetime is untouched, or the guard has broken the feature it protects.
+[$sigClient, $sigFake] = makeClient([$GREETING, $OK()]);
+$sigClient->connect();
+$sigClient->domain()->create('signed.ua', ['registrant' => 'REG-0001', 'secDNS' => ['maxSigLife' => 604800] + $signed]);
+check('a week still goes out unchanged', firstText(xp($sigFake->written[0]), '//secDNS:maxSigLife') === '604800');
+
+echo "the fee agreement: currency upper-cased, amount checked, in the command itself\n";
+// fee:currencyType is pattern [A-Z]{3}, so 'uah' is refused with a bare 2001 at the one point in the
+// protocol where money is involved — and the cap a registrar consented to is the one protection they
+// have against a premium price. check()'s currency argument was already upper-cased; the agreement's
+// was emitted verbatim.
+[$feeClient, $feeFake] = makeClient([$GREETING, $OK(), $OK(), $OK()]);
+$feeClient->connect();
+$feeClient->domain()->create('priced.ua', ['registrant' => 'REG-0001', 'fee' => ['amount' => '340.20', 'currency' => 'uah']]);
+check('a lower-case agreement currency is upper-cased', firstText(xp($feeFake->written[0]), '//fee:create/fee:currency') === 'UAH');
+$feeClient->domain()->renew('priced.ua', '2027-01-15', 1, ['amount' => '340.20', 'currency' => ' uah ']);
+check('and so is one with whitespace around it', firstText(xp($feeFake->written[1]), '//fee:renew/fee:currency') === 'UAH');
+$feeClient->domain()->createBuilder('priced2.ua')->registrant('REG-0001')->maxFee('340.20', 'uah')->send();
+check('the builder reaches the same emitter', firstText(xp($feeFake->written[2]), '//fee:create/fee:currency') === 'UAH');
+// fee:nonNegativeDecimal is an xs:decimal: a word, a symbol or a comma is a frame the server cannot
+// parse. The builder's maxFee() step checked this and the direct call did not, so the two disagreed
+// about what a price looks like.
+check('a fee amount that is not a decimal, from the raw call',
+    $argFails(static fn () => $vClient->domain()->create('x.ua', ['fee' => 'about a hundred'])));
+check('a comma decimal separator', $argFails(static fn () => $vClient->domain()->create('x.ua', ['fee' => ['amount' => '100,00', 'currency' => 'UAH']])));
+check('a currency symbol', $argFails(static fn () => $vClient->domain()->renew('x.ua', '2027-01-15', 1, '₴100.00')));
+check('an empty agreement', $argFails(static fn () => $vClient->domain()->update('x.ua', ['restore' => true, 'fee' => ''])));
+
+echo "a fee query with a currency and no operation is not sent\n";
+// fee:checkType requires at least one <fee:command>, so a currency on its own builds a <fee:check>
+// the schema refuses. Refused rather than quietly dropped: the caller asked what a name costs in this
+// currency, and sending the availability check alone would answer a question they did not ask.
+check('a currency with no operations is refused', $argFails(static fn () => $vClient->domain()->check(['x.ua'], [], 'UAH')));
+check('and the message says a currency alone prices nothing', (static function () use ($vClient): bool {
+    try {
+        $vClient->domain()->check(['x.ua'], [], 'UAH');
+    } catch (\EppTools\Exception\ValidationException $e) {
+        return str_contains($e->getMessage(), 'at least one operation') && str_contains($e->getMessage(), 'UAH');
+    }
+
+    return false;
+})());
+// A plain check with no fee query at all is not a fee query and stays exactly as it was.
+[$plainClient, $plainFake] = makeClient([$GREETING, $OK(), $OK()]);
+$plainClient->connect();
+$plainClient->domain()->check(['plain.ua']);
+check('a check with no fee rider carries no fee:check', !str_contains($plainFake->written[0], 'fee:check'));
+$plainClient->domain()->check(['plain.ua'], ['create' => 1], 'uah');
+$pfx = xp($plainFake->written[1]);
+check('a currency WITH an operation is still sent, upper-cased', firstText($pfx, '//fee:check/fee:currency') === 'UAH'
+    && $pfx->query('//fee:check/fee:command')->length === 1);
+
+echo "login: an empty objUris list means 'not configured', not 'announce nothing'\n";
+// epp-1.0.xsd gives loginSvcType an <objURI> with minOccurs 1, so an empty list writes <svcs/> with
+// no objURI in it and the login is refused outright — the least useful error in EPP. There is no
+// reading of "announce no object services" that can succeed, so an empty list falls back to the
+// greeting's, which is what a null already did.
+[$emptyObjClient, $emptyObjFake] = makeClient([$GREETING, $OK()], 'secret', ['objUris' => [], 'extUris' => []]);
+$emptyObjClient->connect();
+$emptyObjClient->login();
+$eox = xp($emptyObjFake->written[0]);
+check('an empty objUris falls back to the greeting list', $eox->query('//e:svcs/e:objURI')->length === 3);
+// An empty extUris is legitimate and documented — it announces nothing — and must keep working.
+check('an empty extUris still announces nothing', $eox->query('//e:svcs/e:svcExtension')->length === 0);
+// A configured list is still honoured outright, or the fallback has swallowed the override.
+[$setObjClient, $setObjFake] = makeClient([$GREETING, $OK()], 'secret', ['objUris' => [Namespaces::DOMAIN]]);
+$setObjClient->connect();
+$setObjClient->login();
+check('a configured objUris list still wins', xp($setObjFake->written[0])->query('//e:svcs/e:objURI')->length === 1);
+
+echo "enum-shaped arguments are checked against the set the schema closes\n";
+// Each of these is an XSD enumeration, so a value outside it is not a policy refusal — it is a frame
+// the server never parses, answered with a bare 2001 that names no attribute. On a transfer that
+// means the deadline on an incoming request runs while the caller reads an error about nothing.
+check('a transfer op that is not one of the five', $argFails(static fn () => $vClient->domain()->transfer('renew', 'x.ua', 'pw')));
+check('the same on a contact transfer', $argFails(static fn () => $vClient->contact()->transfer('accept', 'REG-0001')));
+check('an info hosts filter outside all/del/sub/none', $argFails(static fn () => $vClient->domain()->info('x.ua', null, 'every')));
+check('a contact role the registry has no attribute for', $argFails(static fn () => $vClient->domain()->create('x.ua', ['contacts' => ['reseller' => 'RES-0001']])));
+check('and the same role through the builder', $argFails(static fn () => $vClient->domain()->createBuilder('x.ua')->contact('reseller', 'RES-0001')->send()));
+check('a role on an update delta too', $argFails(static fn () => $vClient->domain()->update('x.ua', ['add' => ['contacts' => ['abuse' => 'ABU-0001']]])));
+check('a postalInfo type that is not int or loc', $argFails(static fn () => $vClient->contact()->create('REG-0001', [
+    'email' => 'contact@example.com', 'postalInfos' => [['type' => 'ascii', 'name' => 'ACME', 'city' => 'Kyiv', 'cc' => 'UA']],
+])));
+check('a disclose form that is not int or loc', $argFails(static fn () => $vClient->contact()->create('REG-0001', [
+    'email' => 'contact@example.com', 'name' => 'ACME', 'city' => 'Kyiv', 'cc' => 'UA',
+    'disclose' => ['flag' => false, 'addr' => ['ascii']],
+])));
+check('the message names the accepted set', (static function () use ($vClient): bool {
+    try {
+        $vClient->domain()->info('x.ua', null, 'every');
+    } catch (\EppTools\Exception\ValidationException $e) {
+        return str_contains($e->getMessage(), 'all, del, sub, none') && str_contains($e->getMessage(), "'every'");
+    }
+
+    return false;
+})());
+// The legal values are untouched: naming a role with no handles writes nothing rather than raising,
+// because a builder step called in a loop that found nothing is not a mistake.
+[$roleClient, $roleFake] = makeClient([$GREETING, $OK()]);
+$roleClient->connect();
+$roleClient->domain()->createBuilder('roles.ua')->registrant('REG-0001')
+    ->adminContact('ADM-0001')->techContact('TEC-0001')->billingContact()->send();
+$rlx = xp($roleFake->written[0]);
+check('admin, billing and tech are accepted', $rlx->query('//domain:contact')->length === 2
+    && firstText($rlx, '//domain:contact[@type="tech"]') === 'TEC-0001');
+
+echo "check() with no names is not sent\n";
+// domain:check, contact:check and host:check each require at least one child, so an empty list builds
+// a childless frame: a bare 2001 for a question the caller believes they asked. A loop over an empty
+// result set reaches this without anyone writing check([]) on purpose.
+check('domain:check with no names', $argFails(static fn () => $vClient->domain()->check([])));
+check('contact:check with no handles', $argFails(static fn () => $vClient->contact()->check([])));
+check('host:check with no names', $argFails(static fn () => $vClient->host()->check([])));
+check('and the message says one name is the minimum', (static function () use ($vClient): bool {
+    try {
+        $vClient->domain()->check([]);
+    } catch (\EppTools\Exception\ValidationException $e) {
+        return str_contains($e->getMessage(), 'at least one name');
+    }
+
+    return false;
+})());
+
+echo "fees(): avail=\"false\" is as unavailable as avail=\"0\"\n";
+// fee-1.0.xsd types avail as xs:boolean, for which 'false' is as legal as '0' and a registry may send
+// either. Reading it as available sent a caller who gated a create on the price answer straight into
+// a create the registry refuses, with the reason sitting unread in <fee:reason>.
+$feeWord = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
+    . '<result code="1000"><msg>ok</msg></result>'
+    . '<extension><fee:chkData xmlns:fee="urn:ietf:params:xml:ns:epp:fee-1.0"><fee:currency>UAH</fee:currency>'
+    . '<fee:cd avail="false"><fee:objID>unserved.zz</fee:objID><fee:reason>Zone is not served</fee:reason></fee:cd>'
+    . '<fee:cd avail="0"><fee:objID>also-bad.zz</fee:objID><fee:reason>Zone is not served</fee:reason></fee:cd>'
+    . '<fee:cd avail="true"><fee:objID>fine.com.ua</fee:objID>'
+    . '<fee:command name="create"><fee:period unit="y">1</fee:period><fee:fee>120.00</fee:fee></fee:command></fee:cd>'
+    . '<fee:cd><fee:objID>default.com.ua</fee:objID>'
+    . '<fee:command name="create"><fee:period unit="y">1</fee:period><fee:fee>120.00</fee:fee></fee:command></fee:cd>'
+    . '</fee:chkData></extension><trID><svTRID>SRV-F</svTRID></trID></response></epp>';
+$wordFees = \EppTools\Response::fromXml($feeWord)->fees();
+check('avail="false" reads as unavailable', $wordFees['unserved.zz']['avail'] === false);
+check('avail="0" still reads as unavailable', $wordFees['also-bad.zz']['avail'] === false);
+check('avail="true" reads as available', $wordFees['fine.com.ua']['avail'] === true);
+// The schema's default for avail is "true", so an absent attribute means available.
+check('an absent avail takes the schema default', $wordFees['default.com.ua']['avail'] === true);
+check('and the reason is still there to report', $wordFees['unserved.zz']['reason'] === 'Zone is not served');
+
+echo "balance(): only a balance answer is a balance answer\n";
+// <fee:balance> and <fee:creditLimit> are children of every RFC 8748 transform result, so an ordinary
+// create carrying a fee echo holds the same figures under a different parent. The manual says null
+// means "this response is not a balance answer", and availableCredit() is documented as the one to
+// compare a price against — a poll handler branching on balance() would treat a registration as a
+// low-balance warning, with availableCredit() empty because a fee echo does not carry it.
+$feeEchoXml = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
+    . '<result code="1000"><msg>ok</msg></result>'
+    . '<resData><domain:creData xmlns:domain="urn:ietf:params:xml:ns:domain-1.0">'
+    . '<domain:name>fresh.com.ua</domain:name><domain:crDate>2026-09-23T00:00:00.0Z</domain:crDate>'
+    . '<domain:exDate>2027-09-23T00:00:00.0Z</domain:exDate></domain:creData></resData>'
+    . '<extension><fee:creData xmlns:fee="urn:ietf:params:xml:ns:epp:fee-1.0"><fee:currency>UAH</fee:currency>'
+    . '<fee:fee>120.00</fee:fee><fee:balance>4500.00</fee:balance><fee:creditLimit>1000.00</fee:creditLimit>'
+    . '</fee:creData></extension><trID><svTRID>SRV-E</svTRID></trID></response></epp>';
+$echo = \EppTools\Response::fromXml($feeEchoXml);
+check('a create with a fee echo is not a balance answer', $echo->balance() === null);
+check('nor does creditLimit() answer on it', $echo->creditLimit() === null);
+check('nor currentBalance()', $echo->currentBalance() === null);
+check('nor threshold()', $echo->threshold() === null);
+// What the frame really carries is still readable, under the accessor that means it.
+check('the fee that WAS charged is still reported', $echo->feeAmount() === '120.00' && $echo->feeCurrency() === 'UAH');
+// A figure a server relocated into <extValue> under RFC 9038 is an error report, not a statement.
+$relocated = '<?xml version="1.0"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response>'
+    . '<result code="2308"><msg>Data management policy violation</msg><extValue><value>'
+    . '<balance:infData xmlns:balance="http://registry.example/epp/balance-1.0">'
+    . '<balance:balance>120.00</balance:balance></balance:infData></value>'
+    . '<reason lang="en">unhandled namespace</reason></extValue></result>'
+    . '<trID><svTRID>SRV-R</svTRID></trID></response></epp>';
+check('a relocated RFC 9038 payload is not a balance answer either',
+    \EppTools\Response::fromXml($relocated)->balance() === null);
+// And the frames that ARE balance answers still are, including the notice that carries only two fields.
+check('a real balance:infData still answers', $bal->balance() !== null && $bal->availableCredit() === '1234.56');
+check('and so does a threshold-only notice', $low->balance() !== null && $low->threshold() === '500.00');
+
+echo "check(): a blank name is refused, not quietly dropped\n";
+// The opposite treatment to a blank status in a list of statuses, for the opposite reason. Dropping a
+// blank NAME answers a different question than the one asked: fifty names in, forty-nine answers out,
+// and the caller's own loop finds nothing under the blank — which reads as "not available" rather than
+// as "never asked". A wrong answer further from its cause than the 2001 the frame would have earned.
+check('domain:check with a blank name', $argFails(static fn () => $vClient->domain()->check(['ok.com.ua', ''])));
+check('contact:check with a blank handle', $argFails(static fn () => $vClient->contact()->check(['acme-01', '  '])));
+check('host:check with a blank name', $argFails(static fn () => $vClient->host()->check(['ns1.ok.com.ua', ''])));
+check('a list of nothing but blanks too', $argFails(static fn () => $vClient->domain()->check([''])));
+check('the message names the position and the element', (static function () use ($vClient): bool {
+    try {
+        $vClient->domain()->check(['a.com.ua', 'b.com.ua', '']);
+    } catch (\EppTools\Exception\ValidationException $e) {
+        return str_contains($e->getMessage(), 'entry 3 of 3')
+            && str_contains($e->getMessage(), 'domain:name');
+    }
+
+    return false;
+})());
+// Whitespace around a real name is trimmed rather than refused: that is a copy-paste artefact, not a
+// missing question.
+[$trimClient, $trimFake] = makeClient([$GREETING, $OK()]);
+$trimClient->connect();
+$trimClient->domain()->check([' ok.com.ua ']);
+check('a name with spaces around it is trimmed, not refused',
+    str_contains($trimFake->written[0], '<domain:name>ok.com.ua</domain:name>'));
+
+echo "update(): a command that asks for nothing is not sent\n";
+// RFC 5731/5732/5733 section 3.2.5 each say: at least one of add, rem or chg MUST be provided if the
+// command is not being extended. All three schemas make all three elements optional, so they cannot
+// express it — which is why an update describing no change has always been valid XML. The server
+// answers 2003, or worse 1000, and either way the change the caller believes they made was never
+// described. Nobody writes update($name) on purpose; they assemble a delta from variables that all
+// came out empty.
+check('domain:update with no delta', $argFails(static fn () => $vClient->domain()->update('ok.com.ua')));
+check('contact:update with no delta', $argFails(static fn () => $vClient->contact()->update('acme-01')));
+check('host:update with no delta', $argFails(static fn () => $vClient->host()->update('ns1.ok.com.ua')));
+// The same command once its list has been blank-filtered down to nothing: the blanks are dropped, and
+// then there is no change left to describe.
+check('a status list holding only blanks leaves nothing to do',
+    $argFails(static fn () => $vClient->domain()->update('ok.com.ua', ['rem' => ['statuses' => ['', '  ']]])));
+check('and the same for a contact', $argFails(static fn () => $vClient->contact()->update('acme-01', ['remStatuses' => ['']])));
+check('and for a host', $argFails(static fn () => $vClient->host()->update('ns1.ok.com.ua', ['remStatuses' => ['']])));
+// A key that is present but produces no child is the same case: 'clearAuthInfo' => false asks for
+// nothing, and on its own it would have opened an empty <domain:chg/>.
+check('a chg block whose only key produces no child',
+    $argFails(static fn () => $vClient->domain()->update('ok.com.ua', ['chg' => ['clearAuthInfo' => false]])));
+check('an empty chg block', $argFails(static fn () => $vClient->domain()->update('ok.com.ua', ['chg' => []])));
+// RFC 5731 defines no null form for the registrant, so a domain can change hands but not be left
+// without a holder. A blank one underruns clIDType's minLength 3.
+check('a registrant cleared rather than changed',
+    $argFails(static fn () => $vClient->domain()->update('ok.com.ua', ['chg' => ['registrant' => '']])));
+// The exception the RFC itself names: "All of these elements MAY be omitted if an <update> extension
+// is present." A DNSSEC-only update carries no domain delta and must still go out.
+[$secClient, $secFake] = makeClient([$GREETING, $OK()]);
+$secClient->connect();
+$secClient->domain()->update('ok.com.ua', ['secDNS' => ['remAll' => true]]);
+check('a DNSSEC-only update is still sent, extension in place of a delta',
+    str_contains($secFake->written[0], 'secDNS:update')
+    && !str_contains($secFake->written[0], '<domain:rem/>')
+    && !str_contains($secFake->written[0], '<domain:chg/>'));
+// And a restore, which RFC 3915 requires to carry exactly the empty block the rule above forbids.
+[$rstClient, $rstFake] = makeClient([$GREETING, $OK()]);
+$rstClient->connect();
+$rstClient->domain()->update('ok.com.ua', ['restore' => true]);
+check('a restore still carries its deliberately empty chg block',
+    str_contains($rstFake->written[0], '<domain:chg/>') && str_contains($rstFake->written[0], 'rgp:restore'));
+// A real delta beside a filtered-out one: the empty block is omitted, the real one is not, and the
+// command goes out.
+[$mixClient, $mixFake] = makeClient([$GREETING, $OK()]);
+$mixClient->connect();
+$mixClient->domain()->update('ok.com.ua', [
+    'add' => ['statuses' => ['clientHold']],
+    'rem' => ['statuses' => ['']],
+]);
+check('an emptied block is dropped while the real one survives',
+    str_contains($mixFake->written[0], '<domain:status s="clientHold"/>')
+    && !str_contains($mixFake->written[0], 'domain:rem'));
 
 echo "\n$pass passed, $fail failed\n";
 exit($fail === 0 ? 0 : 1);

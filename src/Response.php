@@ -256,21 +256,74 @@ final class Response
      * Account figures from a balance:info response (creditLimit / balance / availableCredit,
      * strings in your account currency), or null when this is not a balance response.
      *
+     * EVERY FIELD IS OPTIONAL IN THE SCHEMA, and the low-balance poll notice is why: balance-1.0.xsd
+     * says in as many words that such a notice may carry only <balance> and <threshold>, because a
+     * mandatory creditLimit would invalidate the one frame a registrar cannot re-request. So the test
+     * for "is this a balance answer at all" reads every field, not two of them. Reading creditLimit
+     * and availableCredit alone returned null for exactly the notice that matters most: the caller's
+     * `if (balance() !== null)` branch never ran, the notice fell through to whatever handles the
+     * unrecognised, and an acked notice is gone — the registry keeps no copy.
+     *
+     * READ FROM THE BALANCE BLOCK, NOT FROM ANYWHERE IN THE FRAME. <fee:balance> and
+     * <fee:creditLimit> are children of every RFC 8748 transform result, so a create or a renew that
+     * carries a fee echo holds the same figures under a different parent — and an ordinary create is
+     * not a balance answer. A caller whose `if (balance() !== null)` branch fires on one has a poll
+     * handler that treats a registration as a low-balance warning, and availableCredit(), documented
+     * as "the one to compare a price against", comes back empty because a fee echo does not carry it.
+     * The same goes for a figure a server relocated into <extValue> under RFC 9038: that is an error
+     * report about a namespace this client did not announce, not an account statement.
+     *
      * @return array{creditLimit:string,balance:string,availableCredit:string}|null
      */
     public function balance(): ?array
     {
-        $limit = $this->value('creditLimit');
-        $avail = $this->value('availableCredit');
-        if ($limit === null && $avail === null) {
+        if ($this->balanceData() === null) {
             return null;
         }
 
         return [
-            'creditLimit'     => (string) $limit,
-            'balance'         => (string) $this->value('balance'),
-            'availableCredit' => (string) $avail,
+            'creditLimit'     => (string) $this->balanceValue('creditLimit'),
+            'balance'         => (string) $this->balanceValue('balance'),
+            'availableCredit' => (string) $this->balanceValue('availableCredit'),
         ];
+    }
+
+    /**
+     * The balance <infData> of this response, or null when it carries none.
+     *
+     * Identified by position and content rather than by namespace: a registry's balance extension is
+     * its own, discovered from the greeting, so this class matches on local names throughout. What
+     * makes a block a balance block is that it is the response's own result data — a child of
+     * <resData> — and that it holds at least one of the four account figures. balance-1.0.xsd makes
+     * every one of them optional, which is why any of the four counts and not a particular pair: a
+     * low-balance notice legitimately carries only <balance> and <threshold>.
+     */
+    private function balanceData(): ?\DOMElement
+    {
+        foreach ($this->xpath->query("//e:resData/*[local-name()='infData']") as $node) {
+            if (!$node instanceof \DOMElement) {
+                continue;
+            }
+            foreach (['creditLimit', 'balance', 'availableCredit', 'threshold'] as $field) {
+                if ($this->xpath->query("./*[local-name()='" . $field . "']", $node)->length > 0) {
+                    return $node;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /** One figure from the balance block; null when there is no balance block, or none of that figure. */
+    private function balanceValue(string $localName): ?string
+    {
+        $block = $this->balanceData();
+        if ($block === null) {
+            return null;
+        }
+        $node = $this->xpath->query("./*[local-name()='" . $localName . "']", $block)->item(0);
+
+        return $node !== null ? trim($node->textContent) : null;
     }
 
     /**
@@ -359,8 +412,15 @@ final class Response
         /** @var \DOMElement $cd */
         foreach ($this->xpath->query('./fee:cd', $chk) as $cd) {
             $name = $this->childText($cd, 'objID');
+            // fee-1.0.xsd types avail as xs:boolean with default "true", and for an xs:boolean
+            // 'false' is as legal a spelling as '0' — a registry is free to send either. Testing
+            // "not '0'" read avail="false" as AVAILABLE, so a caller gating a create on the price
+            // answer went on to a create the registry refuses, with the reason sitting unread in
+            // <fee:reason>. Absent means available, which is what the schema default says, and this
+            // is the same reading availability() gives the object blocks.
+            $flag = $cd->getAttribute('avail');
             $entry = [
-                'avail'    => $cd->getAttribute('avail') !== '0',
+                'avail'    => $flag === '' || in_array($flag, ['1', 'true'], true),
                 'reason'   => $this->childText($cd, 'reason') ?: null,
                 'commands' => [],
                 'periods'  => [],
@@ -1065,10 +1125,10 @@ final class Response
         ];
     }
 
-    /** Your credit limit, or null when the response carries no balance block. */
+    /** Your credit limit, or null when the response carries no balance block. See balance(). */
     public function creditLimit(): ?string
     {
-        return $this->value('creditLimit');
+        return $this->balanceValue('creditLimit');
     }
 
     /**
@@ -1077,13 +1137,25 @@ final class Response
      */
     public function currentBalance(): ?string
     {
-        return $this->balance() === null ? null : $this->value('balance');
+        return $this->balanceValue('balance');
     }
 
     /** What you can still spend: balance plus any credit limit. */
     public function availableCredit(): ?string
     {
-        return $this->value('availableCredit');
+        return $this->balanceValue('availableCredit');
+    }
+
+    /**
+     * The threshold whose crossing queued a low-balance notice, or null on a plain balance answer.
+     *
+     * Its PRESENCE is the difference between a warning and a report — balance-1.0.xsd says so — and
+     * nothing in this library could read it, so a caller had no way to tell the two apart except by
+     * the notice text, which is written in the account's notification language.
+     */
+    public function threshold(): ?string
+    {
+        return $this->balanceValue('threshold');
     }
 
     /** The amount charged for the command just executed, or null when it carried no fee. */

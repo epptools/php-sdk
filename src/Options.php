@@ -20,6 +20,10 @@ use EppTools\Exception\ValidationException;
  * The cost is that a key this library does not understand raises instead of being quietly ignored —
  * which is the point.
  *
+ * Two guards here look at VALUES rather than keys — nonEmptyStrings() and oneOf(). They live in this
+ * class because a command method and the equivalent builder must apply them identically, and a check
+ * copied into three command classes is a check that will be fixed in two of them.
+ *
  * @internal
  */
 final class Options
@@ -79,6 +83,122 @@ final class Options
         }
 
         return null;
+    }
+
+    /**
+     * A list of wire values with the blanks taken out: every entry trimmed, every empty one dropped,
+     * the keys renumbered.
+     *
+     * WHY IT LIVES HERE. The builders each filtered their own lists and the command methods emitted
+     * whatever they were handed, so the guard belonged to one of the two ways of calling the library
+     * and not to the other. A blank is not a harmless no-op on the wire: `<domain:status s=""/>`,
+     * `<contact:status s=""/>` and `<host:status s=""/>` are refused because statusValueType is an
+     * enumeration the empty string is not a member of, an empty `<domain:hostObj/>` underruns
+     * minLength 1 and an empty `<host:addr/>` underruns minLength 3. Each comes back as a bare 2001
+     * that names no element, and the whole command is lost — the four statuses that were spelled
+     * correctly with it.
+     *
+     * Filtering rather than refusing, because a blank in a list is what a form field nobody filled in
+     * produces, and dropping it is what the caller meant. A misspelled KEY is the opposite case and is
+     * refused: see check().
+     *
+     * @return list<string>
+     */
+    public static function nonEmptyStrings(mixed $values): array
+    {
+        $out = [];
+        foreach ((array) $values as $value) {
+            // A nested array or an object has no string form worth putting on the wire; casting one
+            // would write "Array" into an element. Skipped rather than stringified.
+            if (is_array($value) || is_object($value)) {
+                continue;
+            }
+            $value = trim((string) $value);
+            if ($value !== '') {
+                $out[] = $value;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * The list of names or handles a `check` asks about, with a blank one refused rather than dropped.
+     *
+     * The opposite treatment to nonEmptyStrings(), for the opposite reason. A blank status in a list of
+     * statuses to add is noise, and dropping it performs the change the caller meant. A blank here is
+     * the QUESTION, and dropping it answers a different question than the one that was asked: the
+     * caller passes fifty names, gets forty-nine answers, and their own loop over the fifty finds
+     * nothing under the blank — null in PHP, undefined in JavaScript, a KeyError in Python. Only the
+     * Python case is loud. In the other two, "no answer" reads as "not available", so a silent filter
+     * turns a frame the schema would have refused into a WRONG ANSWER further away from the cause.
+     *
+     * Refused with the position named, because a list long enough for one entry to be blank by accident
+     * is a list too long to scan by eye.
+     *
+     * @param string $what the element the value becomes, named as the schema names it
+     * @return list<string>
+     */
+    public static function identifiers(mixed $values, string $context, string $what): array
+    {
+        $out = [];
+        foreach (array_values((array) $values) as $index => $value) {
+            if (is_array($value) || is_object($value)) {
+                throw new ValidationException(sprintf(
+                    '%s: entry %d is not a name — %s takes a list of strings',
+                    $context,
+                    $index + 1,
+                    $context,
+                ));
+            }
+            $value = trim((string) $value);
+            if ($value === '') {
+                $asked = count((array) $values);
+                throw new ValidationException(sprintf(
+                    '%s: entry %d of %d is blank. An empty <%s> is a frame the registry refuses, and '
+                    . 'dropping it would return %d answers to a question about %d — the missing entry '
+                    . 'then reads as unavailable rather than as never asked.',
+                    $context,
+                    $index + 1,
+                    $asked,
+                    $what,
+                    $asked - 1,
+                    $asked,
+                ));
+            }
+            $out[] = $value;
+        }
+
+        return $out;
+    }
+
+    /**
+     * An argument the schema types as a closed set, checked against that set.
+     *
+     * These are the values a caller cannot guess and the registry cannot help with: a transfer `op`,
+     * the `hosts` filter on a domain info, a contact role, the int/loc form of a postal block. Every
+     * one is an XSD enumeration, so a value outside the set is not a policy refusal — it is a frame
+     * the server never parses, answered with a bare 2001 naming no attribute. The set is small,
+     * documented and known here, so the caller is told which value was wrong by their own code.
+     *
+     * @param string[] $allowed
+     * @param string   $what the argument, named as the caller wrote it
+     * @param string   $rule the RFC or XSD rule that closes the set
+     */
+    public static function oneOf(mixed $value, array $allowed, string $what, string $rule): string
+    {
+        $given = trim((string) $value);
+        if (in_array($given, $allowed, true)) {
+            return $given;
+        }
+
+        throw new ValidationException(sprintf(
+            "'%s' is not a valid %s. Use: %s. (%s)",
+            $given,
+            $what,
+            implode(', ', $allowed),
+            $rule,
+        ));
     }
 
     /**

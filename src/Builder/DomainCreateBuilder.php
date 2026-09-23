@@ -120,7 +120,17 @@ final class DomainCreateBuilder extends Builder
             throw new ValidationException('a nameserver name must not be empty');
         }
         $existing = (array) ($this->options['nameservers'] ?? []);
-        $existing[] = ['name' => $name, 'addresses' => array_values($addresses)];
+        // The glue addresses are trimmed and the blanks dropped, which every other list step here
+        // already did and this one did not. An empty <domain:hostAddr/> underruns minLength 3, so one
+        // stray entry makes the whole registration a frame the registry refuses.
+        $glue = [];
+        foreach ($addresses as $address) {
+            $address = trim($address);
+            if ($address !== '') {
+                $glue[] = $address;
+            }
+        }
+        $existing[] = ['name' => $name, 'addresses' => $glue];
         $this->options['nameservers'] = $existing;
 
         return $this;

@@ -15,9 +15,10 @@ use EppTools\Response;
  *         ->remAddresses('192.0.2.9')
  *         ->send();
  *
- * There is no rename: the registry does not implement host:chg, so a rename request is discarded
- * and the command still answers 1000. Create the new host, repoint the domains that use it with
- * domain:update, then delete the old one.
+ * There is no rename. RFC 5732 does define <host:chg><host:name> for it, but a registry that does not
+ * read the chg block discards the rename and still answers 1000, so the caller is told a nameserver
+ * moved when it did not. Create the new host, repoint the domains that use it with domain:update, then
+ * delete the old one.
  */
 final class HostUpdateBuilder extends Builder
 {

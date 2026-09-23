@@ -15,10 +15,12 @@ use EppTools\Response;
  *         ->addStatus('clientUpdateProhibited')
  *         ->send();
  *
- * What you do not mention is left alone. That holds inside an address too: a field you leave out
- * keeps its value, and a field passed as an empty string is cleared. The one thing to know is that
- * the address block is a sequence with a required city and country, so touching any part of it
- * sends the whole block — give city and countryCode whenever you change street, sp or pc.
+ * What you do not mention is left alone — EXCEPT inside an address. A postal block is REPLACED as a
+ * whole rather than merged field by field, so a field you leave out is deleted, and a field passed as
+ * an empty string is cleared. Read the current block with contact()->info() and pass it back with your
+ * change applied; name, city and countryCode are required in every address change because the schema
+ * makes them so, and they keep the frame valid without restoring anything you did not send. See
+ * changeInternationalAddress() for the whole rule.
  */
 final class ContactUpdateBuilder extends Builder
 {
@@ -116,15 +118,33 @@ final class ContactUpdateBuilder extends Builder
     /** Set a client-side status, e.g. `clientUpdateProhibited`. */
     public function addStatus(string ...$statuses): self
     {
-        $this->options['addStatuses'] = array_merge((array) ($this->options['addStatuses'] ?? []), array_values($statuses));
-
-        return $this;
+        return $this->pushStatuses('addStatuses', $statuses);
     }
 
     /** Clear a client-side status. */
     public function remStatus(string ...$statuses): self
     {
-        $this->options['remStatuses'] = array_merge((array) ($this->options['remStatuses'] ?? []), array_values($statuses));
+        return $this->pushStatuses('remStatuses', $statuses);
+    }
+
+    /**
+     * Append statuses, dropping blanks — which every other list step in every other builder already
+     * did, and this one did not. A blank reaches the wire as `<contact:status s=""/>`, and
+     * statusValueType is an enumeration, so the empty string is not a member of it: the frame is
+     * schema-invalid and comes back as a bare 2001 naming no element.
+     *
+     * @param list<string> $statuses
+     */
+    private function pushStatuses(string $key, array $statuses): self
+    {
+        $existing = (array) ($this->options[$key] ?? []);
+        foreach ($statuses as $status) {
+            $status = trim($status);
+            if ($status !== '') {
+                $existing[] = $status;
+            }
+        }
+        $this->options[$key] = $existing;
 
         return $this;
     }

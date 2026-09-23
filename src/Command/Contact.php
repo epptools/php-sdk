@@ -29,6 +29,20 @@ final class Contact
     /** @param string[] $ids */
     public function check(array $ids): Response
     {
+        if ($ids === []) {
+            // contact:checkType requires at least one <contact:id>, so an empty list builds a
+            // childless <contact:check/> the server never parses: a bare 2001 for a question the
+            // caller thinks they asked.
+            throw new ValidationException(
+                'contact:check needs at least one handle — RFC 5733 requires a <contact:id>, so an '
+                . 'empty list is a frame the registry refuses rather than an empty answer',
+            );
+        }
+
+        // A blank handle is refused, not dropped. See Options::identifiers() for why this list is the
+        // one place a blank is not filtered.
+        $ids = Options::identifiers($ids, 'contact:check', 'contact:id');
+
         $frame = $this->client->frame();
         $check = $frame->ns($frame->verb('check'), Namespaces::CONTACT, 'contact:check');
         foreach ($ids as $id) {
@@ -122,7 +136,11 @@ final class Contact
                 $this->appendPostalInfo($frame, $c, (array) $pi);
             }
         } else {
-            $this->appendPostalInfo($frame, $c, $options); // one block from the flat keys
+            // The flat form spreads the postal fields across the top level, beside email, voice and
+            // the rest, so only the postal keys are lifted out of it - passing the whole option map
+            // into a block that then checks its own keys would refuse every non-postal option in it.
+            $flat = array_intersect_key($options, array_flip(self::POSTAL_KEYS));
+            $this->appendPostalInfo($frame, $c, $flat);
         }
 
         if (!empty($options['voice'])) {
@@ -164,35 +182,63 @@ final class Contact
             Options::check($options['chg'], self::CHG_KEYS, "contact:update 'chg'");
         }
 
+        // Worked out BEFORE the frame exists, because Client::frame() stamps a clTRID and a command
+        // that turns out to ask for nothing should not spend one on the way out.
+        //
+        // Trimmed and blank-dropped here, not only in the builder: contact:statusValueType is an
+        // enumeration and the empty string is not a member of it, so one blank status costs the whole
+        // update — and a list that held nothing but blanks must not open a childless <contact:add/>,
+        // which is refused in its own right. See Options::nonEmptyStrings().
+        $addStatuses = Options::nonEmptyStrings($options['addStatuses'] ?? []);
+        $remStatuses = Options::nonEmptyStrings($options['remStatuses'] ?? []);
+
+        $chg = (array) ($options['chg'] ?? []);
+        $pis = $chg['postalInfos'] ?? (isset($chg['postalInfo']) ? [$chg['postalInfo']] : null);
+        $postalInfos = is_array($pis) ? $pis : [];
+        // Whether a child will be emitted, rather than whether the caller passed the key. RFC 5733
+        // says of the chg block: "At least one child element MUST be present" — and 'disclose' => []
+        // or 'postalInfos' => [] are keys that produce none, so on their own they would open a
+        // <contact:chg/> the schema and the server both refuse.
+        $changing = $postalInfos !== [] || isset($chg['voice']) || isset($chg['fax'])
+            || isset($chg['email']) || isset($chg['authInfo']) || !empty($chg['disclose']);
+
+        // RFC 5733 section 3.2.5: "At least one <contact:add>, <contact:rem>, or <contact:chg> element
+        // MUST be provided if the command is not being extended." contact:updateType makes all three
+        // optional, so the schema cannot say this and an update that asks for nothing has always been
+        // valid XML — answered with 2003, or with 1000 and no change made. This library sends no
+        // extension with a contact:update, so there is no case where the empty form is legitimate.
+        if ($addStatuses === [] && $remStatuses === [] && !$changing) {
+            throw new ValidationException(
+                'contact:update asks for nothing: RFC 5733 requires at least one of addStatuses, '
+                . 'remStatuses or chg, so this frame describes no change and the registry has nothing '
+                . 'to apply. Check whether the delta you assembled came out empty — a list of statuses '
+                . 'holding only blanks filters down to nothing.',
+            );
+        }
+
         $frame = $this->client->frame();
         $update = $frame->ns($frame->verb('update'), Namespaces::CONTACT, 'contact:update');
         $frame->ns($update, Namespaces::CONTACT, 'contact:id', $id);
         // contact:updateType allows a SINGLE add/rem block (each holding up to 7 statuses), so the
         // wrapper is created once and every status appended into it — emitting one <contact:add> per
         // status is rejected by the server XSD (add maxOccurs=1).
-        $addStatuses = (array) ($options['addStatuses'] ?? []);
         if ($addStatuses !== []) {
             $add = $frame->ns($update, Namespaces::CONTACT, 'contact:add');
             foreach ($addStatuses as $status) {
-                $frame->ns($add, Namespaces::CONTACT, 'contact:status', null, ['s' => (string) $status]);
+                $frame->ns($add, Namespaces::CONTACT, 'contact:status', null, ['s' => $status]);
             }
         }
-        $remStatuses = (array) ($options['remStatuses'] ?? []);
         if ($remStatuses !== []) {
             $rem = $frame->ns($update, Namespaces::CONTACT, 'contact:rem');
             foreach ($remStatuses as $status) {
-                $frame->ns($rem, Namespaces::CONTACT, 'contact:status', null, ['s' => (string) $status]);
+                $frame->ns($rem, Namespaces::CONTACT, 'contact:status', null, ['s' => $status]);
             }
         }
-        $chg = $options['chg'] ?? [];
-        if ($chg !== []) {
+        if ($changing) {
             $block = $frame->ns($update, Namespaces::CONTACT, 'contact:chg');
             // RFC 5733 chg order: postalInfo*, voice?, fax?, email?, authInfo?, disclose?
-            $pis = $chg['postalInfos'] ?? (isset($chg['postalInfo']) ? [$chg['postalInfo']] : null);
-            if (is_array($pis)) {
-                foreach ($pis as $pi) {
-                    $this->appendPostalInfo($frame, $block, (array) $pi, partial: true);
-                }
+            foreach ($postalInfos as $pi) {
+                $this->appendPostalInfo($frame, $block, (array) $pi, partial: true);
             }
             if (isset($chg['voice'])) {
                 $frame->ns($block, Namespaces::CONTACT, 'contact:voice', (string) $chg['voice']);
@@ -201,6 +247,14 @@ final class Contact
                 $frame->ns($block, Namespaces::CONTACT, 'contact:fax', (string) $chg['fax']);
             }
             if (isset($chg['email'])) {
+                // Not a clearable field: RFC 5733 types it minTokenType (minLength 1), so an empty
+                // one is a schema-invalid frame answered with a bare 2001 that names nothing -
+                // the same refusal contact:create already makes.
+                if ((string) $chg['email'] === '') {
+                    throw new ValidationException(
+                        "contact:update cannot clear 'email' — RFC 5733 requires a non-empty one",
+                    );
+                }
                 $frame->ns($block, Namespaces::CONTACT, 'contact:email', (string) $chg['email']);
             }
             if (isset($chg['authInfo'])) {
@@ -226,6 +280,10 @@ final class Contact
 
     public function transfer(string $op, string $id, ?string $authInfo = null): Response
     {
+        // The five operations are an epp-1.0.xsd enumeration. A frame carrying any other verb is never
+        // parsed, so the answer is a bare 2001 and the transfer stays where it was — with the
+        // deadline on an incoming one still running.
+        $op = Options::oneOf($op, self::TRANSFER_OPS, "transfer 'op'", 'RFC 5730 transferOpType');
         $frame = $this->client->frame();
         $transfer = $frame->verb('transfer');
         $transfer->setAttribute('op', $op);
@@ -239,9 +297,20 @@ final class Contact
         return $this->client->request($frame);
     }
 
-    /** Build one <contact:postalInfo> block from name/org/street/city/sp/pc/cc/type. */
+    /** Every key a postalInfo block understands; `type` picks the int or loc form. */
+    private const POSTAL_KEYS = ['type', 'name', 'org', 'street', 'city', 'sp', 'pc', 'cc'];
+
+    /** Every field that can be disclosed or withheld, plus the flag that says which. */
+    private const DISCLOSE_KEYS = ['flag', 'name', 'org', 'addr', 'voice', 'fax', 'email'];
+
+    /** The two forms a postal block and a disclosable field come in (contact:postalInfoEnumType). */
+    private const POSTAL_TYPES = ['int', 'loc'];
+
+    /** The five transfer operations epp-1.0.xsd enumerates (transferOpType). */
+    private const TRANSFER_OPS = ['request', 'approve', 'reject', 'cancel', 'query'];
+
     /**
-     * Build one <contact:postalInfo>.
+     * Build one <contact:postalInfo> from type/name/org/street/city/sp/pc/cc.
      *
      * @param array<string, mixed> $pi
      * @param bool $partial true inside <contact:chg>. The block is still sent WHOLE — see below; only
@@ -250,7 +319,14 @@ final class Contact
      */
     private function appendPostalInfo(Frame $frame, \DOMElement $parent, array $pi, bool $partial = false): void
     {
-        $block = $frame->ns($parent, Namespaces::CONTACT, 'contact:postalInfo', null, ['type' => (string) ($pi['type'] ?? 'int')]);
+        // The key check reaches INSIDE the block, not just the option that carries it. `postalCode`
+        // for `pc` was accepted and dropped, and on an update a postalInfo REPLACES the stored one,
+        // so the registrant's postcode was deleted behind a 1000.
+        Options::check($pi, self::POSTAL_KEYS, 'contact postalInfo');
+        // int or loc, and nothing else: contact:postalInfoEnumType is a two-value enumeration, so
+        // 'ascii' or 'INT' is a frame the server never parses rather than a form it does not hold.
+        $type = Options::oneOf($pi['type'] ?? 'int', self::POSTAL_TYPES, "postalInfo 'type'", 'RFC 5733 postalInfoEnumType');
+        $block = $frame->ns($parent, Namespaces::CONTACT, 'contact:postalInfo', null, ['type' => $type]);
 
         // A postalInfo inside <contact:chg> REPLACES the stored one. It is not merged field by field.
         //
@@ -276,10 +352,14 @@ final class Contact
             }
         }
 
-        // name is postalLineType, minLength 1: there is NO WAY to clear a name. An empty element is
-        // schema-invalid and the server answers a bare 2001 naming no field — refused here, where the
-        // message can say so.
-        self::requireNotEmpty($pi['name'] ?? '', 'name');
+        // The loop above is the only guard the name needs. A second identical test stood here, and a
+        // check that cannot fire is worse than none: a reader counts it as protection and stops
+        // looking for the one that does the work.
+        //
+        // What it knew is worth keeping, because it is the rule that decides which fields below are
+        // emitted empty and which are refused: contact-1.0.xsd gives name and city postalLineType
+        // (minLength 1) and cc ccType (exactly two characters), so none of those three can be sent
+        // empty at all — while org, street, sp and pc have no minimum, which is how they are cleared.
         $frame->ns($block, Namespaces::CONTACT, 'contact:name', (string) $pi['name']);
 
         if ($partial ? array_key_exists('org', $pi) : !empty($pi['org'])) {
@@ -303,26 +383,6 @@ final class Contact
     }
 
     /**
-     * Refuse an empty value for an element whose schema type forbids one.
-     *
-     * The distinction is not a house rule, it is contact-1.0.xsd: `optPostalLineType` (org, street,
-     * sp) has no minLength and `pcType` has none either, so those four clear by being sent empty.
-     * `postalLineType` (name, city) has minLength 1 and `ccType` is exactly two characters, so an
-     * empty one of those cannot be sent at all. Getting it wrong costs a round trip and returns a
-     * bare 2001 with no field named — which is the least useful error in EPP.
-     */
-    private static function requireNotEmpty(mixed $value, string $field): void
-    {
-        if (trim((string) $value) === '') {
-            throw new ValidationException(sprintf(
-                'postalInfo: "%s" cannot be empty — RFC 5733 gives it a schema type with a minimum '
-                . 'length, so there is no way to clear it. Omit the key to leave it unchanged.',
-                $field,
-            ));
-        }
-    }
-
-    /**
      * Build a <contact:disclose flag="0|1"> block. name/org/addr take a type (int|loc),
      * passed as a list; voice/fax/email are bare flags toggled by a truthy value.
      *
@@ -330,6 +390,10 @@ final class Contact
      */
     private function appendDisclose(Frame $frame, \DOMElement $parent, array $disclose): void
     {
+        // A misspelled field here is a privacy instruction that reads as applied and is not: the
+        // frame goes out as a childless <contact:disclose flag="0"/>, the registry answers 1000, and
+        // the address the registrant asked to withhold stays published.
+        Options::check($disclose, self::DISCLOSE_KEYS, 'contact disclose');
         $flag = !empty($disclose['flag']) ? '1' : '0';
         $disc = $frame->ns($parent, Namespaces::CONTACT, 'contact:disclose', null, ['flag' => $flag]);
         foreach (['name', 'org', 'addr'] as $field) {
@@ -337,7 +401,12 @@ final class Contact
                 continue;
             }
             foreach ((array) $disclose[$field] as $type) {
-                $frame->ns($disc, Namespaces::CONTACT, "contact:{$field}", null, ['type' => (string) $type]);
+                // Same two-value enumeration as a postal block's type, for the same reason: a
+                // disclosure instruction naming a form the schema does not know is not a preference
+                // the registry declines, it is a frame it never reads — so the field the registrant
+                // asked to withhold stays published and the command reports an error naming nothing.
+                $form = Options::oneOf($type, self::POSTAL_TYPES, "disclose '{$field}' form", 'RFC 5733 postalInfoEnumType');
+                $frame->ns($disc, Namespaces::CONTACT, "contact:{$field}", null, ['type' => $form]);
             }
         }
         foreach (['voice', 'fax', 'email'] as $field) {

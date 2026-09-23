@@ -46,7 +46,7 @@ final class Client
     private const PW_MAX_LOGINSEC = 128;
 
     /** Client version, sent to the server as <loginSec:app> when RFC 8807 is in use. */
-    public const VERSION = '1.1.1';
+    public const VERSION = '1.1.2';
 
     private Config $config;
     private Transport $connection;
@@ -153,13 +153,47 @@ final class Client
         return $this->greeting;
     }
 
-    /** Send <hello>; the server replies with a fresh <greeting>. */
+    /**
+     * Send <hello>; the server replies with a fresh <greeting>.
+     *
+     * This is the documented keep-alive, so it is the call a long-lived worker makes on a timer — and
+     * the reply is checked for the same reason connect() checks the first frame. A <response> left
+     * over from a half-open session, or a middlebox banner, advertises no services: stored as the
+     * greeting it would downgrade the next login() to the DEFAULT service list, announcing services
+     * this server may not offer and losing the extensions it does. The registry's own goes with them,
+     * so registryExtUri() answers null and a licence create, a forced host delete and balance() all
+     * begin throwing while change() simply stops arriving.
+     *
+     * A bad reply therefore leaves the PREVIOUS greeting in place: the session's service list is still
+     * the one the server sent, and the caller is told the keep-alive failed rather than discovering it
+     * three commands later.
+     */
     public function hello(): Response
     {
-        $this->connection->writeFrame(
-            '<?xml version="1.0" encoding="UTF-8"?><epp xmlns="' . Namespaces::EPP . '"><hello/></epp>'
-        );
-        $this->greeting = Response::fromXml($this->connection->readFrame());
+        $xml = '<?xml version="1.0" encoding="UTF-8"?><epp xmlns="' . Namespaces::EPP . '"><hello/></epp>';
+        // Logged like every other frame. <hello> carries no clTRID, so it cannot go through the
+        // request helper that pairs a reply with its command — which is why this frame was the one
+        // frame in the library that left no trace in the log at all.
+        if ($this->logger !== null) {
+            $this->logger->debug('EPP >> hello', ['frame' => $xml]);
+        }
+        $this->connection->writeFrame($xml);
+        $raw = $this->connection->readFrame();
+        if ($this->logger !== null) {
+            $this->logger->debug('EPP << greeting', ['frame' => $raw]);
+        }
+        $greeting = Response::fromXml($raw);
+        if (!$greeting->isGreeting()) {
+            throw new ConnectionException(sprintf(
+                'Reply to <hello> from %s:%d is not an EPP <greeting> (result %d: %s) — the greeting '
+                . 'this session already holds was kept',
+                $this->config->host,
+                $this->config->port,
+                $greeting->code(),
+                $greeting->message() ?? 'no message'
+            ));
+        }
+        $this->greeting = $greeting;
 
         return $this->greeting;
     }
@@ -196,7 +230,17 @@ final class Client
 
         $greetingObj = $this->greeting !== null ? $this->greeting->serviceObjUris() : [];
         $greetingExt = $this->greeting !== null ? $this->greeting->serviceExtUris() : [];
-        $objUris = $this->config->objUris ?? ($greetingObj ?: Namespaces::DEFAULT_OBJ_URIS);
+        // An EMPTY objUris list means "not configured", the same as null. epp-1.0.xsd gives
+        // loginSvcType an <objURI> with minOccurs 1, so an empty list writes <svcs/> with no objURI in
+        // it — a login refused outright, and refused with the least useful error in EPP. There is no
+        // reading of "announce no object services" that can succeed, so the greeting's list is used
+        // instead, which is what this library already does for a null and what the greeting-mirroring
+        // path promises.
+        //
+        // An empty extUris is the opposite case and keeps its meaning: announcing no extensions is
+        // legitimate, documented, and produces a login that works.
+        $configured = $this->config->objUris;
+        $objUris = ($configured === null || $configured === []) ? ($greetingObj ?: Namespaces::DEFAULT_OBJ_URIS) : $configured;
         $extUris = $this->config->extUris ?? ($greetingExt ?: Namespaces::DEFAULT_EXT_URIS);
         // The epp-1.0 base URI is not an object service and is never listed in <login>.
         $objUris = array_values(array_filter($objUris, static fn (string $u): bool => $u !== Namespaces::EPP));
@@ -254,7 +298,7 @@ final class Client
             // registry support desk asked "which client, on what" answers both from one login.
             $frame->ns($ua, Namespaces::LOGINSEC, 'loginSec:app', 'EppTools PHP SDK ' . self::VERSION);
             $frame->ns($ua, Namespaces::LOGINSEC, 'loginSec:tech', 'PHP ' . PHP_VERSION);
-            $frame->ns($ua, Namespaces::LOGINSEC, 'loginSec:os', PHP_OS_FAMILY);
+            $frame->ns($ua, Namespaces::LOGINSEC, 'loginSec:os', self::osDescription());
             if ($relocatePw) {
                 $frame->ns($block, Namespaces::LOGINSEC, 'loginSec:pw', $this->config->password);
             }
@@ -491,6 +535,26 @@ final class Client
         }
 
         return $response;
+    }
+
+    /**
+     * The operating system, as RFC 8807 asks for it: architecture, name and version.
+     *
+     * Section 3.1 wants the system "with version if available", such as "x86_64 Mac OS X 10.15.2", and
+     * the registrar manual shows the same shape. PHP_OS_FAMILY stood here and gave just "Windows" - a
+     * family, with no architecture and no version, so a support desk reading one login learned less
+     * than the RFC provides for. Each part is skipped when the platform does not report it rather than
+     * padded, so the value never carries an empty field.
+     */
+    private static function osDescription(): string
+    {
+        $parts = array_filter([
+            php_uname('m'),
+            php_uname('s'),
+            php_uname('r'),
+        ], static fn (string $p): bool => trim($p) !== '');
+
+        return $parts === [] ? 'unknown' : implode(' ', array_map('trim', $parts));
     }
 
     /** Mask passwords / authInfo (any namespace) before a frame is logged. */
