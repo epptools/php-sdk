@@ -41,17 +41,17 @@ The properties are public, so anything you did not pass can be read back off the
 | `clid` | `''` | Your registrar identifier, 3–16 characters of Latin letters, digits and hyphen. Empty raises `ConfigException` from `login()` before anything is sent. A well-formed but wrong value is refused by the server with 2200. |
 | `password` | `''` | Your EPP password. Empty raises `ConfigException` from `login()`. Shorter than 6 characters, or longer than 128, raises `ConfigException` before the socket opens. Longer than 16 is possible only where the server offers RFC 8807 — see [Long passwords](#long-passwords) below. |
 | `port` | `700` | The EPP port. Change it only if you were given a different endpoint. A wrong port produces a `ConnectionException` from `connect()`. |
-| `lang` | `'en'` | The language of the server's result messages for this session. The registry advertises `en`, `uk`, `ua` and `ru` in its greeting; a value it does not advertise fails the login with 2102. This is the language of `message()`, not of the poll notices, which carry their own. |
+| `lang` | `'en'` | The language of the server's result messages for this session. Which languages exist is each registry's own choice, and its greeting lists them — read `greeting()->values('lang')` and pick from that; a value the server does not advertise fails the login with 2102. This is the language of `message()`, not of the poll notices, which carry their own. |
 | `connectTimeout` | `10.0` | Seconds to wait for the TCP connect and TLS handshake. Too low on a slow link produces a `ConnectionException` that reads like a refused connection. |
 | `readTimeout` | `30.0` | Seconds to wait for a reply frame. Fractions are honoured (`2.5` means two and a half seconds). A value of zero or less is floored at one second, so it never means "wait forever". A read that times out raises `ConnectionException` and **closes the connection** — a half-read frame leaves the byte stream at an unknown offset, and the next command would read the middle of this one's reply. |
 | `verifyPeer` | `true` | Verify the server certificate chain. Leave it on. See [TLS](#tls-and-certificate-verification). |
 | `verifyPeerName` | `true` | Verify that the certificate matches `host`. Turning it off is a narrow loosening (right certificate, wrong hostname) that is occasionally reasonable in development. |
-| `caFile` | `null` | Path to the PEM bundle of the CA that signed the **server** certificate. Required against `epp.registry.example:700`, which uses the registry's own private CA. Unset or wrong, the handshake fails with a certificate-verify error. |
+| `caFile` | `null` | Path to the PEM bundle of the CA that signed the **server** certificate. Needed only where that CA is not in the system trust store — a private or self-signed one; against an ordinary browser-trusted certificate there is nothing to set. Where it IS needed, unset or wrong means the handshake fails with a certificate-verify error. |
 | `clientCert` | `null` | Path to **your** client certificate, PEM. Only needed if your endpoint requires mutual TLS; the public port 700 does not. |
 | `clientKey` | `null` | Path to your client private key, PEM. May be omitted when the key is bundled into `clientCert`. |
 | `clientKeyPassphrase` | `null` | Passphrase for an encrypted client key. Wrong, and the handshake fails while loading the key rather than while verifying the peer. |
-| `objUris` | `null` | The object services to announce in `<login>`. `null` means "exactly what the greeting offered", which is why a default session is never refused for an unsupported service. Override it and any URI this server does not serve fails the login with 2307. The base `epp-1.0` URI is never sent as an object service, whether or not the greeting lists it. |
-| `extUris` | `null` | The extension services to announce, same rule. Announcing fewer extensions than you use means the registry will not return that extension's data. |
+| `objUris` | `null` | The object services to announce in `<login>`. `null` means "exactly what the greeting offered", which is why a default session is never refused for an unsupported service. An EMPTY list means the same thing, because `epp-1.0.xsd` requires at least one `<objURI>` and a login carrying none is refused outright — there is no reading of "announce no object services" that can succeed. Override it with a real list and any URI this server does not serve fails the login with 2307. The base `epp-1.0` URI is never sent as an object service, whether or not the greeting lists it. |
+| `extUris` | `null` | The extension services to announce. `null` mirrors the greeting, and an EMPTY list is legitimate here — it announces nothing, and a login with no `<svcExtension>` is valid. Announcing fewer extensions than you use means the registry will not return that extension's data. |
 | `clTRIDPrefix` | `'PHP-SDK'` | The first segment of every auto-generated client transaction id. Set it to something that identifies your system in the registry's logs. See [Commands](commands.md#client-transaction-ids). |
 | `registryExtUri` | `null` | The namespace of **this registry's own** object extension. `null` — the normal case — reads it from the greeting. Set it only for a registry whose extension is not named `…/registry-<version>`, which is what discovery matches on. A wrong value is not rejected: an extension in a namespace the server does not know is IGNORED, so the data goes missing silently. See [Commands](commands.md#your-registrys-own-extensions). |
 | `registryBalanceUri` | `null` | The same, for the account-balance extension. |
@@ -75,18 +75,19 @@ field is set.
 
 | Scenario | Config |
 |---|---|
-| `epp.registry.example:700` (private-CA certificate) | set `caFile` to the registry CA `.pem` — **required** |
+| Private-CA or self-signed server certificate | set `caFile` to the `.pem` bundle of that CA |
 | Public, browser-trusted certificate | the defaults (`verifyPeer: true`, `verifyPeerName: true`) |
 | Hostname mismatch in development | `verifyPeerName: false` |
 | Mutual-TLS endpoint | `clientCert` + `clientKey` (+ `clientKeyPassphrase` if the key is encrypted) |
 
-The endpoint on `epp.registry.example:700` presents a certificate issued by the registry's **own private
-CA**. That CA is in no system trust store, so `caFile` must point at its `.pem` bundle. Ask the
-registry for it.
+**Which of these applies is your registry's choice, so ask them.** Many present an ordinary
+browser-trusted certificate, and then there is nothing to configure. Others run their own CA, whose
+certificate is in no system trust store: there `caFile` must point at that `.pem` bundle or the
+handshake fails.
 
-Otherwise the endpoint is strict RFC EPP and needs **no client certificate**: authentication is
-clID plus password over TLS, with an IP allowlist. Your own certificate and key are needed only if
-your endpoint requires mutual TLS.
+Authentication itself is clID plus password inside TLS. A client certificate is needed only where the
+registry requires mutual TLS, and many additionally restrict access to source addresses they have
+registered — that part is policy, not protocol, so ask which applies to your account.
 
 ### When the handshake fails
 
@@ -165,6 +166,14 @@ Sends `<hello>` and reads the fresh `<greeting>` the server answers with. Two us
 service menu, and keeping an idle session alive — the registry closes a session that has been idle
 too long, and a `hello` is the cheapest frame that resets that clock. The greeting it returns
 replaces the stored one.
+
+**A reply that is not a greeting raises `ConnectionException`, and the stored greeting is left
+alone.** This is the keep-alive, so it is the call a worker makes on a timer, and a `<response>`
+stored in place of the greeting would advertise no services at all: the next `login()` would fall
+back to the default list, announcing services this server may not offer and losing the extensions
+it does — the registry's own among them, after which a licence create, a forced host delete and
+`balance()` all begin to throw. Keeping the previous greeting means the session survives the
+failed keep-alive with the service list the server actually sent.
 
 ### `login(?string $newPassword = null): Response`
 

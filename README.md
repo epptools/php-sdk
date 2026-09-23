@@ -99,11 +99,13 @@ part is policy, not protocol.
 The commonest first-run failure is certificate verification, and it looks like this:
 
 ```
-ConnectionException: TLS connect failed: certificate verify failed
+ConnectionException: Cannot connect to epp.registry.example:700 — SSL operation failed …
+certificate verify failed
 ```
 
-That almost always means `caFile` is unset or points at the wrong bundle. Check it before anything
-else:
+The exception carries the reason PHP itself reported, so read the tail of the message: a
+certificate-verify failure almost always means `caFile` is unset or points at the wrong bundle. Check
+it before anything else:
 
 ```bash
 openssl s_client -connect epp.registry.example:700 -CAfile /path/to/registry-ca.pem </dev/null
@@ -123,15 +125,18 @@ occasionally reasonable in development; `verifyPeer: false` is not reasonable an
 $client->connect(); $client->login(); $client->logout(); $client->disconnect();
 $client->login('new-password');                // rotate the EPP password during login
                                                // (6-16 chars: the <pw> schema type's limit)
-$client->hello();                              // re-read the greeting / keep-alive
+$client->hello();                              // re-read the greeting / keep-alive. A reply that is
+                                               // not a greeting raises and keeps the one you have,
+                                               // so a bad keep-alive cannot leave the session
+                                               // advertising services the server never offered
 
 // Domain
 $client->domain()->check(['example1.com.ua', 'example2.com.ua']);
 $client->domain()->info('example1.com.ua', 'pw');
 $client->domain()->create('example1.com.ua', [
     'years'       => 1,
-    'registrant'  => 'C1',
-    'contacts'    => ['admin' => 'C1', 'tech' => 'C2'],
+    'registrant'  => 'REG-0001',
+    'contacts'    => ['admin' => 'ADM-0001', 'tech' => 'TEC-0001'],
     'nameservers' => ['ns1.example.net', 'ns2.example.net'],
     // Or with the glue inlined, where the registry wants the addresses with the name rather
     // than a reference to a host object you created first. A command uses one model or the
@@ -146,7 +151,7 @@ $client->domain()->create('example1.com.ua', [
 $client->domain()->update('example1.com.ua', [
     'add' => ['ns' => ['ns3.example.net'], 'statuses' => ['clientHold']],
     'rem' => ['statuses' => ['clientHold']],
-    'chg' => ['registrant' => 'C9', 'authInfo' => 'newpw'],
+    'chg' => ['registrant' => 'REG-0002', 'authInfo' => 'newpw'],
     // DNSSEC (RFC 5910) on an existing domain:
     // 'secDNS' => ['add' => ['dsData' => [[...]]], 'remAll' => true, 'maxSigLife' => 1209600],
 ]);
@@ -166,16 +171,16 @@ $fees = $r->fees();                            // ['_currency'=>'UAH', 'example1
 // Up to 20 entries per frame; transfer and restore are one-year operations however many you ask.
 $table = $client->domain()->check(['example1.com.ua'], fee: ['create' => [1, 2, 3, 5, 10]], currency: 'UAH');
 $table->feeFor('example1.com.ua', 'create', 5);       // '480.00' — or null with a reason in fees()
-$client->domain()->create('example1.com.ua', ['years' => 1, 'registrant' => 'C1',
+$client->domain()->create('example1.com.ua', ['years' => 1, 'registrant' => 'REG-0001',
     'fee' => '100.00',                         // "I agree to pay up to 100.00" — not a price you set
 ]);
 $client->domain()->renew('example1.com.ua', '2027-01-15', 1, fee: ['amount' => '90.00', 'currency' => 'UAH']);
 $client->domain()->restore('example1.com.ua', fee: '1000.00');  // your cap, not a published price
 
 // Contact
-$client->contact()->check(['c1']);
-$client->contact()->info('c1', 'pw');
-$client->contact()->create('c1', ['name' => 'ACME', 'city' => 'Kyiv', 'cc' => 'UA',
+$client->contact()->check(['REG-0001']);
+$client->contact()->info('REG-0001', 'pw');
+$client->contact()->create('REG-0001', ['name' => 'ACME', 'city' => 'Kyiv', 'cc' => 'UA',
     'email' => 'contact@example.com', 'authInfo' => 'pw',
     // 'postalInfos' => [['type'=>'int', ...], ['type'=>'loc', ...]],   // int + localized
     // 'disclose'    => ['flag'=>false, 'addr'=>['int'], 'voice'=>true], // RFC 5733 privacy
@@ -185,15 +190,16 @@ $client->contact()->create('c1', ['name' => 'ACME', 'city' => 'Kyiv', 'cc' => 'U
 $handle = $client->contact()->createAuto([
     'name' => 'ACME', 'city' => 'Kyiv', 'cc' => 'UA', 'email' => 'contact@example.com',
 ])->objectName();                              // the minted id appears HERE and nowhere else
-$client->contact()->update('c1', ['chg' => ['email' => 'new-contact@example.com',
-    // Inside an address, PRESENCE decides: a field you leave out keeps its value, and a field
-    // given as '' is CLEARED — the only way to remove org, sp or pc. The block needs its city
-    // and country whenever you touch it, because the schema makes them required.
-    // 'postalInfo' => ['name'=>'New Name', 'city'=>'Lviv', 'cc'=>'UA', 'org'=>''],
+$client->contact()->update('REG-0001', ['chg' => ['email' => 'new-contact@example.com',
+    // A postal block is REPLACED, not merged: a field you leave out is DELETED, and a field given
+    // as '' is cleared — which is the only way to remove org, sp or pc. So read the current block
+    // with info()->postalInfo() and send it back with your change applied; name, city and cc are
+    // required in every change because the schema makes them so.
+    // 'postalInfo' => ['name'=>'New Name', 'city'=>'Lviv', 'cc'=>'UA', 'org'=>''] + $current,
     // 'disclose'   => ['flag'=>true],
 ]]);
-$client->contact()->delete('c1');
-$client->contact()->transfer('request', 'c1', 'pw');
+$client->contact()->delete('REG-0001');
+$client->contact()->transfer('request', 'REG-0001', 'pw');
 
 // Host
 $client->host()->check(['ns1.example.net']);
@@ -233,7 +239,11 @@ $r->statuses();       // ['ok'] or ['clientHold', ...] — from the status `s` a
 $r->value('exDate');  // first element with that local name
 $r->values('hostObj');// all elements with that local name — nameservers are <domain:hostObj>
                       // ('ns' is only the WRAPPER, so it returns one fused string)
-$r->balance();        // ['creditLimit'=>…,'balance'=>…,'availableCredit'=>…] or null (balance:info)
+$r->balance();        // ['creditLimit'=>…,'balance'=>…,'availableCredit'=>…] or null. Read ONLY from
+                      // a balance answer: a create carrying a fee echo holds the same figures under
+                      // <fee:…> and is not one, so this stays null there
+$r->threshold();      // poll: the figure whose crossing queued a low-balance notice, else null —
+                      // its presence is what makes a notice a warning rather than a report
 $r->prices();         // domain:info hint: ['renewal'=>['value'=>…,'currency'=>'UAH'], ...]
 $r->fees();           // check+fee: per-name RFC 8748 prices (see above), [] when absent
 $r->chargedFee();     // transform echo: ['currency'=>'UAH','fee'=>'100.00'] or null
@@ -332,7 +342,7 @@ $r->isAvailable('example.com.ua');       // true | false | null ("the answer sai
 $r->unavailableReason('taken.com.ua');   // "In use", or null when it is available
 $r->isPremium('rare.com.ua');            // priced outside the standard list
 $r->feeClass('rare.com.ua');             // "premium" | "standard" | null
-$r->creditLimit();  $r->currentBalance();  $r->availableCredit();
+$r->creditLimit();  $r->currentBalance();  $r->availableCredit();  $r->threshold();
 $r->feeAmount();    $r->feeCurrency();     // what this transform actually charged
 $r->extValues();    // per-<extValue>: which ELEMENT the registry rejected, plus the reason
 ```
@@ -384,9 +394,9 @@ $response = $client->domain()->createBuilder('your-brand.com.ua')
 Available on `domain()->createBuilder()` / `updateBuilder()`, `contact()->createBuilder($id,
 $email)` / `updateBuilder()`, and `host()->updateBuilder()`. Three things worth knowing:
 
-- **Every list step accumulates.** `->techContact('a')->techContact('b')` and
-  `->techContact('a', 'b')` are the same thing, so building in a loop or behind an `if` reads the
-  way it behaves.
+- **Every list step accumulates.** `->techContact('TEC-0001')->techContact('TEC-0002')` and
+  `->techContact('TEC-0001', 'TEC-0002')` are the same thing, so building in a loop or behind an `if`
+  reads the way it behaves. Blanks are dropped, here and in the equivalent direct call.
 - **Nothing is sent until `send()`.** Until then the builder is an ordinary value you can keep,
   pass around, or inspect with `toOptions()` — which returns exactly the array the direct call
   takes, so you can log it or queue it.

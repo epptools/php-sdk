@@ -35,6 +35,7 @@ Amounts in the examples are illustrative. They are not the registry's tariff.
 |---|---|
 | `balance(): ?array` | the whole balance block, or `null` |
 | `creditLimit(): ?string` · `currentBalance(): ?string` · `availableCredit(): ?string` | one figure each |
+| `threshold(): ?string` | the figure whose crossing queued a low-balance notice; `null` on a plain balance answer |
 | `fees(): array` | every quote in a check reply, keyed by name |
 | `feeFor(string $name, string $operation, int $years = 1): ?string` | one quote |
 | `feeClass(?string $name = null): ?string` · `isPremium(?string $name = null): bool` | which price list a name sits on |
@@ -116,9 +117,20 @@ carries the same block, so the same accessors read it:
 $client->poll()->drain(function (EppTools\Response $notice): void {
     if ($notice->balance() !== null) {
         alertBilling((string) $notice->currentBalance());   // a decimal string — never cast it
+        $notice->threshold();                               // set here, absent on a plain answer
     }
 });
 ```
+
+**`threshold()` is what makes this a warning rather than a report.** Every field in the block is
+optional, and such a notice may legitimately carry only `balance` and `threshold` — so the presence of
+the threshold, not the text of the notice, is what tells you the account crossed the line you asked to
+be told about. The text is written in your account's notification language; the figure is not.
+
+`balance()` answers only on a real balance block. A create or a renew that carried a fee agreement
+comes back with `<fee:balance>` and `<fee:creditLimit>` of its own — the same figures under a
+different parent — and this branch does not fire on one, which is what keeps a registration from
+being handled as a low-balance warning.
 
 **Result codes:** `1000`, with the figures in the frame. A refusal — the service not offered to this
 session, an account that may not read it — arrives as a `CommandException` like any other; if you
@@ -246,9 +258,11 @@ if ($entry !== null && $entry['avail'] === false) {
 }
 ```
 
-Passing a currency with no operations at all sends a `<fee:check>` carrying only the currency. Name
-the operations you actually want quoted instead — the answer to a query that asks for nothing is
-registry policy, not something you can rely on.
+**A currency with no operations at all is refused before anything is sent.** `fee:checkType` requires
+at least one `<fee:command>`, so a currency on its own is a frame the registry cannot parse. It is
+refused rather than dropped, because a currency prices nothing by itself: sending the availability
+check without the price query would answer a question you did not ask, and the silence where the
+prices should be would read as "there is nothing to charge". Name the operations you want quoted.
 
 ---
 

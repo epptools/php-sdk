@@ -27,7 +27,7 @@ not an error.
 | `isPending(): bool` | `true` only for 1001 — accepted, completing offline | `false` |
 | `isGreeting(): bool` | `true` when the frame is a `<greeting>` rather than a `<response>` | `false` |
 | `message(): ?string` | The result `<msg>`, in the session language | `null` |
-| `messageLang(): ?string` | The language of that message: `en`, `uk`, `ua`, `ru` | `null` |
+| `messageLang(): ?string` | The language of that message — whichever of the greeting's `<lang>` values the session asked for | `null` |
 | `errorReasons(): array` | The `<extValue><reason>` prose from a failed command, as `string[]` | `[]` |
 | `extValues(): array` | The `<extValue>` blocks in full — see below | `[]` |
 | `clTRID(): ?string` | The client transaction id the server echoed | `null` |
@@ -330,9 +330,20 @@ $b->balance();           // ['creditLimit' => '…', 'balance' => '…', 'availa
 $b->creditLimit();
 $b->currentBalance();    // named for what it is, because balance() returns the whole block
 $b->availableCredit();
+$b->threshold();         // set only on a low-balance notice: the figure whose crossing queued it
 ```
 
-All three are decimal strings in your account currency. See [Balance](balance.md).
+The figures are decimal strings in your account currency. See [Balance](balance.md).
+
+**`threshold()` is what tells a warning from a report.** A plain `balance()` answer has none; a
+low-balance notice carries one, and its presence is the difference between "here are your figures"
+and "you are below the line you asked to be told about". Every field in the block is optional, so
+such a notice may carry only `balance` and `threshold`.
+
+All of these read the balance block and nothing else. A create or a renew that carried a fee
+agreement comes back with `<fee:balance>` and `<fee:creditLimit>` in its own echo — the same figures
+under a different parent — and none of these accessors answers on it. Read what a transform charged
+with `feeAmount()` instead.
 
 ## Poll
 
@@ -344,6 +355,7 @@ All three are decimal strings in your account currency. See [Balance](balance.md
 | `queueMessageLang(): ?string` | The notice's language: `uk`, `ru`, `en` | `null` |
 | `queueDate(): ?string` | When the notice was queued | `null` |
 | `pendingActionData(): ?array` | The outcome of an operation the registry processed offline | `null` for an ordinary notice or an empty queue |
+| `change(): ?array` | RFC 8590: what the registry DID to your object, as data rather than as the sentence in `queueMessage()` | `null` when the notice carries no `changeData` |
 
 **`queueMessage()`, not `message()`.** `message()` returns the command-result banner — "Command
 completed successfully; ack to dequeue" — which is a constant string. The notice's real content is

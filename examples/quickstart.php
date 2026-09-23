@@ -11,8 +11,9 @@ declare(strict_types=1);
  * This is a COMMAND-LINE example — run it with `php`, not via a web request. For a web
  * app (php-fpm), use the SDK classes directly and echo your own output: see web.php.
  *
- * EPP_CA is REQUIRED: port 700 presents a certificate from the registry's OWN private CA, which
- * no system trust store carries, so the handshake fails without it.
+ * EPP_CA points at the CA bundle that signed the SERVER certificate. Set it where your registry
+ * runs its own CA, whose certificate no system trust store carries; against an ordinary
+ * browser-trusted certificate there is nothing to set, and this example's guard can go.
  */
 
 $autoload = is_file(__DIR__ . '/../vendor/autoload.php')
@@ -25,7 +26,7 @@ use EppTools\Config;
 use EppTools\Exception\EppException;
 $caFile = getenv('EPP_CA') ?: '';
 if ($caFile === '') {
-    fwrite(STDERR, "Set EPP_CA to the registry CA certificate: :700 presents a private-CA certificate.\n");
+    fwrite(STDERR, "Set EPP_CA to the CA bundle that signed the registry's certificate.\n");
     exit(2);
 }
 

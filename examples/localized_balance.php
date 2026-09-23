@@ -11,8 +11,8 @@ declare(strict_types=1);
  *   EPP_HOST=epp.registry.example EPP_CLID=EXAMPLE EPP_PASSWORD=secret \
  *   php examples/localized_balance.php example.com.ua
  *
- * A COMMAND-LINE example — run with `php`. EPP_CA is REQUIRED: port 700 presents a certificate
- * from the registry's OWN private CA, which no system trust store carries.
+ * A COMMAND-LINE example — run with `php`. EPP_CA points at the CA bundle that signed the SERVER
+ * certificate: needed where the registry runs its own CA, and not otherwise.
  */
 
 $autoload = is_file(__DIR__ . '/../vendor/autoload.php')
@@ -27,7 +27,7 @@ use EppTools\Exception\EppException;
 $domain = $argv[1] ?? 'example.com.ua';
 $caFile = getenv('EPP_CA') ?: '';
 if ($caFile === '') {
-    fwrite(STDERR, "Set EPP_CA to the registry CA certificate: :700 presents a private-CA certificate.\n");
+    fwrite(STDERR, "Set EPP_CA to the CA bundle that signed the registry's certificate.\n");
     exit(2);
 }
 

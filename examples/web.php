@@ -25,9 +25,20 @@ $names = array_values(array_filter(array_map(
     'trim',
     explode(',', (string) ($_GET['names'] ?? 'example.com.ua')),
 )));
+// `?names=` — present but empty, or nothing but commas — filters down to no names at all, and
+// domain:check requires at least one <domain:name>: the library refuses the call, which would surface
+// here as a 502 about the registry for what is really a bad request. Answer it as one, before opening
+// a socket.
+if ($names === []) {
+    http_response_code(400);
+    echo json_encode(['ok' => false, 'error' => 'names is empty — give at least one domain name']);
 
-// EPP_CA is REQUIRED: port 700 presents a certificate from the registry's OWN private CA, which
-// no system trust store carries — without it every request would fail the handshake.
+    return;
+}
+
+// EPP_CA points at the CA bundle that signed the SERVER certificate. Needed where the registry
+// runs its own CA, whose certificate no system trust store carries; against a browser-trusted
+// certificate there is nothing to set and this guard can go.
 $caFile = getenv('EPP_CA') ?: '';
 if ($caFile === '') {
     http_response_code(500);

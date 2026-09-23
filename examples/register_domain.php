@@ -19,10 +19,11 @@ use EppTools\Config;
 use EppTools\Exception\CommandException;
 use EppTools\Exception\EppException;
 
-// EPP_CA is REQUIRED: port 700 presents a certificate from the registry's OWN private CA.
+// EPP_CA points at the CA bundle that signed the SERVER certificate — needed where the registry
+// runs its own CA rather than presenting a browser-trusted one.
 $caFile = getenv('EPP_CA') ?: '';
 if ($caFile === '') {
-    fwrite(STDERR, "Set EPP_CA to the registry CA certificate: :700 presents a private-CA certificate.\n");
+    fwrite(STDERR, "Set EPP_CA to the CA bundle that signed the registry's certificate.\n");
     exit(2);
 }
 

@@ -81,6 +81,11 @@ answer.
 fee query with more than 20 entries is refused by this library with a `ValidationException` before
 it is sent.
 
+**An empty list is refused before anything is sent.** `domain:check` requires at least one
+`<domain:name>`, so `check([])` — which a loop over an empty result set reaches without anyone
+writing it on purpose — would be a childless frame, answered with a bare `2001` rather than with
+an empty answer.
+
 ---
 
 ## info
@@ -172,7 +177,7 @@ for them. **The create fee is charged on success.**
 | `nameservers` (also spelled `nameServers`) | `string[]`, or a list of `['name' => …, 'addresses' => [...]]` | `<domain:ns>` holding `<domain:hostObj>` or `<domain:hostAttr>` |
 | `authInfo` | string | `<domain:authInfo><domain:pw>` |
 | `license` | string | `<registry:license>` inside `<registry:create>` |
-| `secDNS` | `['dsData' => [...], 'keyData' => [...], 'maxSigLife' => int]` | `<secDNS:create>` |
+| `secDNS` | `['dsData' => [...], 'maxSigLife' => int]`, or `'keyData'` in place of `'dsData'` — the two are alternatives, never both | `<secDNS:create>` |
 | `fee` | `'100.00'` or `['amount' => '100.00', 'currency' => 'UAH']` | `<fee:create>` — the cap you agree to |
 
 ### A first registration
@@ -294,9 +299,22 @@ $client->domain()->create('example.com.ua', [
 ]);
 ```
 
-The `secDNS` array accepts `dsData`, `keyData` and `maxSigLife` and nothing else. A `secDNS` array
-holding neither `dsData` nor `keyData` sends no DNSSEC block at all, because a childless
-`<secDNS:create/>` fails the registry's schema check.
+The `secDNS` array accepts `dsData`, `keyData` and `maxSigLife` and nothing else.
+
+**`dsData` and `keyData` are alternatives, not a pair.** RFC 5910 §2: "`<secDNS:dsData>` and
+`<secDNS:keyData>` MUST NOT be mixed, except for when `<secDNS:keyData>` is a child element of
+`<secDNS:dsData>` for server validation", and `secDNS-1.1.xsd` writes that as a choice. So an array
+carrying one of each is refused here with a `ValidationException` rather than at the registry, where it
+would arrive as a bare `2001` naming no element and leave the domain unsigned. The nested form above —
+a DS record carrying the DNSKEY it was computed from — is the one legal combination, and it is still a
+`dsData` record.
+
+`maxSigLife` is a whole number of seconds, 1 or more: `secDNS-1.1.xsd` puts a minimum of 1 on it, so a
+`0` is not "no limit" but a frame the registry refuses. Omit it to leave the registry's own signature
+lifetime alone.
+
+A `secDNS` array holding neither `dsData` nor `keyData` sends no DNSSEC block at all, because a
+childless `<secDNS:create/>` fails the registry's schema check.
 
 ### licence (where the registry requires one)
 
@@ -448,6 +466,10 @@ A record named in `rem` must match what the registry holds in every field, not j
 `remAll` and `rem` are alternatives — where both are present, `remAll` is what goes out; the
 [update builder](builders.md) refuses the combination outright rather than choosing for you.
 
+Inside `add` and inside `rem`, `dsData` and `keyData` are alternatives in exactly the way they are on a
+create: one block may carry DS records or public keys, never one of each. RFC 5910 forbids the mixture
+and the library refuses it, in both directions.
+
 A `secDNS` array carrying none of `add`, `rem`, `remAll` or `maxSigLife` sends no DNSSEC block at
 all: a childless `<secDNS:update/>` is a `2003` at the registry for what reads like a no-op, and the
 DNSSEC change you meant would be lost with the command still reported as failed.
@@ -546,12 +568,18 @@ reformats through a local zone lands a day either side for every domain expiring
 then renews against a date the registry does not hold. If you need local time, convert it where you
 display it, never before sending it back.
 
+`Domain::dateOnly()` is that trim, public and static, for the rare case where you want the date part
+without sending anything. You never need it for `renew()` — the library applies it for you — and the
+other language bindings keep the same helper private.
+
 A mismatch on `curExpDate` comes back as `2105`, and that is the answer to trust: it means the
 domain's expiry is not what you thought, so re-read it before doing anything else. A `2105` is never
 a reason to retry the same frame.
 
-**Result codes:** `1000`; `2004` (period out of range); `2105` (`curExpDate` mismatch, or not
-renewable); `2104` (insufficient funds); `2303`; `2304`; `2306`.
+**Result codes:** `1000`; `2004` (a `fee` cap below the real price); `2105` (`curExpDate` mismatch, or
+not renewable); `2104` (insufficient funds); `2303`; `2304`; `2306`. A period outside 1–99 does not
+reach the registry at all: RFC 5731 bounds `periodType`, so this library raises a
+`ValidationException` naming the value before a frame is built.
 
 ---
 
@@ -644,13 +672,19 @@ ones.
 public function restore(string $name, string|array|null $fee = null): Response
 ```
 
-**On the wire:** an `<update>` whose only content is `<rgp:update><rgp:restore op="request"/>` —
-RFC 3915. This is exactly `update($name, ['restore' => true])`, and the two are interchangeable.
-**The restore fee is charged on success**, and it is usually the most expensive operation in the
-catalogue.
+**On the wire:** an `<update>` carrying an empty `<domain:chg/>` plus
+`<rgp:update><rgp:restore op="request"/>` in the extension — RFC 3915. This is exactly
+`update($name, ['restore' => true])`, and the two are interchangeable. **The restore fee is charged on
+success**, and it is usually the most expensive operation in the catalogue.
 
-No `add`, `rem` or `chg` may travel with a restore. Change the domain afterwards, in a second
-command.
+**The empty `<domain:chg/>` is required, not incidental.** RFC 3915 §4.2.5: "at least one empty
+`<domain:add>`, `<domain:rem>`, or `<domain:chg>` element MUST be present if this extension is
+specified within an `<update>` command", and the RFC's own example uses `<domain:chg/>`. A restore
+changes nothing about the domain, so the element goes out with nothing in it — the library adds it for
+you.
+
+That is about PRESENCE. Nothing you would put INSIDE one of those blocks belongs in a restore: change
+the domain afterwards, in a second command.
 
 ```php
 $info = $client->domain()->info('example.com.ua');

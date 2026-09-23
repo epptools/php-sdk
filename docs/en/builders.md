@@ -73,11 +73,14 @@ $builder->send();
 Single-valued steps **replace** instead: calling `->years(1)->years(2)` leaves `2`, the way assigning
 a variable twice does. The tables below say which is which.
 
-The steps that take names, handles and addresses — nameservers, contacts, domain and host statuses,
-glue addresses — drop an empty or whitespace-only value rather than sending it as an empty element,
-so a loop over a list with a blank in it does not produce `<domain:hostObj/>`. The two contact
-status steps, `ContactUpdateBuilder::addStatus()` and `remStatus()`, pass what you give them
-through, so filter that list yourself if it can contain a blank.
+Every step that takes names, handles and addresses — nameservers, contacts, statuses on all three
+objects, glue addresses — drops an empty or whitespace-only value rather than sending it as an empty
+element, so a loop over a list with a blank in it does not produce `<domain:hostObj/>`. The commands
+themselves do the same, so the direct call and the builder behave alike: a blank status, an empty
+nameserver or an empty address is dropped wherever it is given. That matters because an empty value is
+not a harmless no-op on the wire — `<domain:status s=""/>` is outside the schema's enumeration and an
+empty `<host:addr/>` underruns its minimum length, and either one costs the whole command, including
+the entries that were spelled correctly.
 
 ### 2. Nothing is sent until `send()`
 
@@ -200,15 +203,18 @@ try {
 }
 ```
 
-`contact()` takes any role name the registry recognises, so a zone with a role beyond
-admin/tech/billing is reachable without a new method:
+`contact()` names the role, which is useful when you hold it in a variable rather than writing it out —
+`adminContact()`, `techContact()` and `billingContact()` are the same call with the role filled in:
 
 ```php
-->contact('reseller', 'C-0009')
+->contact('billing', 'C-0009')
 ```
 
-An empty role raises a `ValidationException` — `contacts['' => …]` would emit
-`<domain:contact type="">`, which the registry refuses with a `2005` naming nothing useful.
+**The three roles are the whole set.** RFC 5731 types `<domain:contact type="…">` as an enumeration of
+`admin`, `billing` and `tech`, so a reseller or an abuse role is not a name the registry might
+recognise — it is a frame the registry never parses, refused with a bare `2001` that names no
+attribute. Anything else raises a `ValidationException` here, with the accepted set in the message, and
+so does an empty role.
 
 ### The two delegation models
 
@@ -434,7 +440,8 @@ $r = $client->contact()->createBuilder('C-0001', 'contact@example.com')
 echo $r->objectName(), "\n";      // 'C-0001' — the handle
 ```
 
-Named arguments suit these two steps: the four optional parameters are all strings, and
+Named arguments suit these two steps: four of the parameters are optional and one of those is a
+list of street lines, and
 `internationalAddress('ACME', 'Kyiv', 'UA', [], 'ACME LLC', null, '01001')` is a row of values whose
 meaning you have to count out.
 
@@ -522,9 +529,11 @@ $client->contact()->updateBuilder('C-0001')
     ->changeInternationalAddress(
         name: $current['name'],
         city: 'Lviv',
-        countryCode: 'UA',
-        street: $current['street'] ?? null,
+        countryCode: $current['cc'],
+        street: $current['street'],
         org: '',
+        stateProvince: $current['sp'],
+        postalCode: $current['pc'],
     )
     ->send();
 ```

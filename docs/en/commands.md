@@ -296,6 +296,7 @@ the library models; see [Responses](responses.md#raw-access).
 | `RGP` | `urn:ietf:params:xml:ns:rgp-1.0` | RFC 3915 (restore) |
 | `FEE` | `urn:ietf:params:xml:ns:epp:fee-1.0` | RFC 8748 (prices) |
 | `LOGINSEC` | `urn:ietf:params:xml:ns:epp:loginSec-1.0` | RFC 8807 (login security) |
+| `CHANGEPOLL` | `urn:ietf:params:xml:ns:changePoll-1.0` | RFC 8590 (what the registry did to your object) |
 | `XSI` | `http://www.w3.org/2001/XMLSchema-instance` | XML Schema |
 
 Two more are values rather than namespaces: `LOGINSEC_SENTINEL` is the reserved `[LOGIN-SECURITY]`
@@ -325,6 +326,9 @@ with `force` and `balance()` all throw `ConfigException` naming what was wanted 
 server did offer. That refusal is the point. An extension sent under a namespace a server does not
 recognise is **ignored, not rejected**, so a guess would come back `1000 OK` with the licence
 silently unset.
+
+`requireRegistryExtUri(string $what)` is the same lookup with that refusal built in, for a command of
+your own that cannot proceed without the namespace.
 
 Discovery matches the last segment of an advertised URI — `.../registry-1.0`, `urn:…:balance` —
 which is the convention registries follow, not a rule anyone enforces. For a registry that names its

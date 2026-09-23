@@ -57,6 +57,10 @@ question entirely.
 
 **Result codes:** `1000` for any well-formed check; `2005` names a syntactically invalid id.
 
+**An empty list is refused before anything is sent.** `contact:check` requires at least one
+`<contact:id>`, so `check([])` would be a childless frame the registry answers with a bare `2001`
+rather than with an empty answer.
+
 ---
 
 ## info
@@ -333,13 +337,17 @@ Inside the block you send, an empty string is still what clears an optional fiel
 | the key holds `''` | the field is **cleared** — the way to remove `org`, `sp` or `pc` |
 | the key is absent | the field is not sent — and the registry deletes what it held |
 
-Change both forms in one command with `postalInfos`:
+Change both forms in one command with `postalInfos`. Each block still has to be complete, so each
+one is read back and sent whole — `+` keeps the left-hand `city` and takes the rest from what the
+registry holds:
 
 ```php
+$postal = $client->contact()->info('acme-01')->postalInfo();
+
 $client->contact()->update('acme-01', [
     'chg' => ['postalInfos' => [
-        ['type' => 'int', 'city' => 'Lviv', 'cc' => 'UA'],
-        ['type' => 'loc', 'city' => 'Львів', 'cc' => 'UA'],
+        ['type' => 'int', 'city' => 'Lviv'] + $postal['int'],
+        ['type' => 'loc', 'city' => 'Львів'] + $postal['loc'],
     ]],
 ]);
 ```

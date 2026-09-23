@@ -1,6 +1,6 @@
 # EppTools PHP SDK — reference manual
 
-Version **1.1.1**.
+Version **1.1.2**.
 
 ```bash
 composer require epptools/sdk

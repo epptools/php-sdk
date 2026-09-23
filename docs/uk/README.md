@@ -1,6 +1,6 @@
 # EppTools PHP SDK — довідковий посібник
 
-Версія **1.1.1**.
+Версія **1.1.2**.
 
 ```bash
 composer require epptools/sdk

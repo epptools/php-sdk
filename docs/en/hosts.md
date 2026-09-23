@@ -33,8 +33,8 @@ first-run refusals:
 | **external** | a domain elsewhere (`ns1.acme.example`) | **refused** — its addresses live at its own registry, so sending one is `2306` |
 
 A client that always emits an address must omit it for external hosts. Addresses must be public
-Internet addresses, and there is a per-host limit (13 at this registry) beyond which the frame is
-refused.
+Internet addresses, and most registries cap how many one host may carry — the number is theirs, not
+the protocol's, so ask yours; beyond it the frame is refused.
 
 ---
 
@@ -60,6 +60,10 @@ registry-wide namespace: a nameserver another registrar created is visible to yo
 name.
 
 **Result codes:** `1000` for any well-formed check; `2005` names a syntactically invalid host name.
+
+**An empty list is refused before anything is sent.** `host:check` requires at least one
+`<host:name>`, so `check([])` would be a childless frame the registry answers with a bare `2001`
+rather than with an empty answer.
 
 ---
 
@@ -194,10 +198,11 @@ public function updateBuilder(string $name): HostUpdateBuilder
 
 ## There is no rename
 
-**A host object cannot be renamed.** The registry reads only the `add` and `rem` blocks of
-`host:update`; a name change has nowhere to go, and a frame that carried one alongside an address
-change would apply the addresses, drop the rename, and still answer `1000` — leaving you believing a
-nameserver moved when it did not.
+**This library does not rename a host object.** RFC 5732 does define the element for it — a
+`<host:chg>` carrying a new `<host:name>` — but implementing it is each registry's own decision, and
+one that does not read `chg` applies the rest of the command, drops the rename and still answers
+`1000`. That is the failure worth avoiding: you are left believing a nameserver moved when it did
+not, and the domains delegated to it still point at the old name.
 
 So `update()` refuses a `newName` option outright:
 
